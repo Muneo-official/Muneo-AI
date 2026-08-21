@@ -110,9 +110,3 @@ python -m eval.flag_review_rows    # 검토 필요한 행만 추출
 python -m eval.apply_review_labels # 라벨 병합
 python -m eval.retrieval_eval      # precision@k / recall 비교
 ```
-
-## 참고 문서
-
-- [`docs/IMPLEMENTATION_LOG.md`](docs/IMPLEMENTATION_LOG.md) — 각 결정의 배경과 이유, 발견한 버그들
-- [`docs/PORTFOLIO_UPGRADE_NOTES.md`](docs/PORTFOLIO_UPGRADE_NOTES.md) — 재구조화 원안 로드맵
-- [`docs/MONGODB_SETUP_GUIDE.md`](docs/MONGODB_SETUP_GUIDE.md) — Atlas 클러스터 셋업 절차
