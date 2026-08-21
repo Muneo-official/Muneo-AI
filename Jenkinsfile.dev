@@ -1,0 +1,166 @@
+// Jenkins job: Pipeline script from SCM, Script Path = Jenkinsfile.dev
+//
+// Required Jenkins environment:
+//   DEV01_HOST, DEV01_USER
+// Optional Jenkins environment:
+//   DEV01_SSH_PORT=22, DEV_DOCKER_NETWORK=muneo-dev-internal
+//
+// Required Jenkins credentials:
+//   ghcr-credential          Username/password credential that can pull the private GHCR image
+//   muneo-dev01-ssh         SSH private key credential for the DEV host
+//   muneo-dev01-known-hosts Secret file containing the pinned DEV host key
+//
+// IMAGE_TAG must be the full commit SHA published by .github/workflows/dev-image.yml.
+
+pipeline {
+    agent { label 'docker-agent' }
+
+    environment {
+        GHCR_IMAGE = 'ghcr.io/muneo-official/muneo-ai'
+        DEV01_DEPLOY_PATH = '/opt/muneo/ai'
+    }
+
+    options {
+        disableConcurrentBuilds()
+        skipDefaultCheckout(true)
+        timestamps()
+    }
+
+    parameters {
+        string(
+            name: 'IMAGE_TAG',
+            defaultValue: '',
+            description: 'DEV Image workflow가 GHCR에 게시한 40자리 full commit SHA'
+        )
+    }
+
+    stages {
+        stage('Checkout deployment files') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Validate deployment input') {
+            steps {
+                sh '''
+                    set -eu
+
+                    : "${IMAGE_TAG:?Provide the full Git commit SHA as IMAGE_TAG}"
+                    : "${GHCR_IMAGE:?Provide the GHCR image name}"
+                    : "${DEV01_HOST:?Configure DEV01_HOST in Jenkins}"
+                    : "${DEV01_USER:?Configure DEV01_USER in Jenkins}"
+                    : "${DEV01_DEPLOY_PATH:?Configure DEV01_DEPLOY_PATH in Jenkins}"
+
+                    printf '%s\n' "${IMAGE_TAG}" | grep -Eq '^[0-9a-f]{40}$'
+                    printf '%s\n' "${GHCR_IMAGE}" | grep -Eq '^ghcr\.io/[a-z0-9._/-]+$'
+                    printf '%s\n' "${DEV01_HOST}" | grep -Eq '^[A-Za-z0-9._-]+$'
+                    printf '%s\n' "${DEV01_USER}" | grep -Eq '^[A-Za-z0-9._-]+$'
+                    printf '%s\n' "${DEV01_DEPLOY_PATH}" | grep -Eq '^/[A-Za-z0-9._/-]+$'
+
+                    DEV01_SSH_PORT="${DEV01_SSH_PORT:-22}"
+                    DEV_DOCKER_NETWORK="${DEV_DOCKER_NETWORK:-muneo-dev-internal}"
+
+                    printf '%s\n' "${DEV01_SSH_PORT}" | grep -Eq '^[0-9]+$'
+                    printf '%s\n' "${DEV_DOCKER_NETWORK}" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9_.-]*$'
+                '''
+                script {
+                    env.AI_IMAGE_REF = "${env.GHCR_IMAGE}:${params.IMAGE_TAG}"
+                }
+            }
+        }
+
+        stage('Deploy DEV') {
+            steps {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'ghcr-credential',
+                        usernameVariable: 'GHCR_PULL_USER',
+                        passwordVariable: 'GHCR_PULL_TOKEN'
+                    ),
+                    file(
+                        credentialsId: 'muneo-dev01-known-hosts',
+                        variable: 'DEV01_KNOWN_HOSTS'
+                    )
+                ]) {
+                    sshagent(credentials: ['muneo-dev01-ssh']) {
+                        sh '''
+                            set -eu
+
+                            DEV01_SSH_PORT="${DEV01_SSH_PORT:-22}"
+                            DEV_DOCKER_NETWORK="${DEV_DOCKER_NETWORK:-muneo-dev-internal}"
+                            SSH_TARGET="${DEV01_USER}@${DEV01_HOST}"
+
+                            ssh \
+                                -p "${DEV01_SSH_PORT}" \
+                                -o "UserKnownHostsFile=${DEV01_KNOWN_HOSTS}" \
+                                -o StrictHostKeyChecking=yes \
+                                "${SSH_TARGET}" \
+                                "mkdir -p '${DEV01_DEPLOY_PATH}'"
+
+                            scp \
+                                -P "${DEV01_SSH_PORT}" \
+                                -o "UserKnownHostsFile=${DEV01_KNOWN_HOSTS}" \
+                                -o StrictHostKeyChecking=yes \
+                                docker-compose.dev.yml \
+                                "${SSH_TARGET}:${DEV01_DEPLOY_PATH}/docker-compose.dev.yml"
+
+                            printf '%s' "${GHCR_PULL_TOKEN}" \
+                                | ssh \
+                                    -p "${DEV01_SSH_PORT}" \
+                                    -o "UserKnownHostsFile=${DEV01_KNOWN_HOSTS}" \
+                                    -o StrictHostKeyChecking=yes \
+                                    "${SSH_TARGET}" \
+                                    "set -eu; \
+                                     trap 'docker logout ghcr.io >/dev/null 2>&1 || true' EXIT; \
+                                     docker login ghcr.io --username '${GHCR_PULL_USER}' --password-stdin; \
+                                     cd '${DEV01_DEPLOY_PATH}'; \
+                                     test -f .env; \
+                                     umask 077; \
+                                     printf '%s\\n' \
+                                         'AI_IMAGE=${AI_IMAGE_REF}' \
+                                         'DEV_DOCKER_NETWORK=${DEV_DOCKER_NETWORK}' \
+                                         > .env.dev-image; \
+                                     docker network inspect '${DEV_DOCKER_NETWORK}' >/dev/null 2>&1 \
+                                         || docker network create '${DEV_DOCKER_NETWORK}'; \
+                                     docker compose -f docker-compose.dev.yml \
+                                         --env-file .env --env-file .env.dev-image config >/dev/null; \
+                                     docker compose -f docker-compose.dev.yml \
+                                         --env-file .env --env-file .env.dev-image pull ai; \
+                                     echo 'Memory before AI deploy:'; \
+                                     free -h; \
+                                     docker stats --no-stream || true; \
+                                     if ! docker compose -f docker-compose.dev.yml \
+                                         --env-file .env --env-file .env.dev-image \
+                                         up -d --no-build --wait --wait-timeout 600; then \
+                                         echo 'AI deploy failed; collecting diagnostics:'; \
+                                         docker compose -f docker-compose.dev.yml \
+                                             --env-file .env --env-file .env.dev-image ps -a; \
+                                         docker compose -f docker-compose.dev.yml \
+                                             --env-file .env --env-file .env.dev-image \
+                                             logs --tail=200 ai || true; \
+                                         docker compose -f docker-compose.dev.yml \
+                                             --env-file .env --env-file .env.dev-image \
+                                             stop ai || true; \
+                                         free -h; \
+                                         docker stats --no-stream || true; \
+                                         exit 1; \
+                                     fi; \
+                                     docker compose -f docker-compose.dev.yml \
+                                         --env-file .env --env-file .env.dev-image ps; \
+                                     echo 'Memory after AI deploy:'; \
+                                     free -h; \
+                                     docker stats --no-stream"
+                        '''
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "DEV image deployed: ${env.AI_IMAGE_REF}"
+        }
+    }
+}

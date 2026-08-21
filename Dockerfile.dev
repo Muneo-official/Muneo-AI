@@ -1,0 +1,44 @@
+# syntax=docker/dockerfile:1.7
+
+FROM python:3.12-slim AS builder
+
+ENV VIRTUAL_ENV=/opt/venv
+ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
+
+RUN python -m venv "${VIRTUAL_ENV}"
+
+COPY requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu \
+    && pip install --no-cache-dir -r /tmp/requirements.txt
+
+
+FROM python:3.12-slim AS runtime
+
+ENV VIRTUAL_ENV=/opt/venv
+ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libgomp1 \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system ai \
+    && useradd --system --gid ai --create-home ai
+
+WORKDIR /app
+
+COPY --from=builder /opt/venv /opt/venv
+COPY --chown=ai:ai app ./app
+
+RUN mkdir -p /app/logs /home/ai/.cache/huggingface \
+    && chown -R ai:ai /app/logs /home/ai/.cache
+
+USER ai
+
+EXPOSE 8000
+
+# 첫 기동 시 임베딩/리랭커 모델을 내려받으므로 시작 유예 시간을 길게 둔다.
+HEALTHCHECK --interval=10s --timeout=5s --start-period=180s --retries=24 \
+    CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)"]
+
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
