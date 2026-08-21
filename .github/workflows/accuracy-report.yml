@@ -1,0 +1,30 @@
+name: Accuracy Report
+
+# estimate_feedback에 쌓인 실제 계약금액 vs 예측 범위를 주기적으로 집계한다 (scripts/accuracy_report.py).
+# 알림(Slack 등)은 아직 안 붙였다 — Actions 실행 로그/Step Summary에서 사람이 직접 확인하는 방식.
+# 데이터가 쌓이기 전(피드백 몇 건 안 됨)엔 숫자가 크게 흔들릴 수 있으니 참고용으로만 볼 것.
+
+on:
+  schedule:
+    - cron: "0 9 * * 1"  # 매주 월요일 09:00 UTC (KST 18:00)
+  workflow_dispatch: {}   # 필요할 때 수동 실행 가능
+
+jobs:
+  accuracy-report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # accuracy_report.py는 pymongo/dotenv만 쓴다 — 전체 requirements.txt(torch 등)를 설치할
+      # 필요가 없어서 워크플로가 몇 분이 아니라 수십 초 안에 끝난다.
+      - name: Install dependencies
+        run: pip install pymongo python-dotenv pydantic-settings
+
+      - name: Run accuracy report
+        env:
+          MONGO_URI: ${{ secrets.MONGO_URI }}
+        run: python -m scripts.accuracy_report | tee -a "$GITHUB_STEP_SUMMARY"

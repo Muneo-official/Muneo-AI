@@ -1,0 +1,27 @@
+# env
+.env
+.env.*
+!.env.example
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# logs
+logs/
+
+# internal docs (not for public repo)
+docs/
+
+# IDE
+.idea/
+.vscode/
+.claude/
+
+# OS
+.DS_Store

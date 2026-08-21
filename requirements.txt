@@ -1,0 +1,28 @@
+# API 서버
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+pydantic>=2.9.0
+pydantic-settings>=2.5.0
+slowapi>=0.1.9
+
+# MongoDB (Atlas, $vectorSearch)
+motor>=3.5.0
+pymongo>=4.7.0
+
+# 임베딩 (로컬 계산, 외부 API 불필요)
+sentence-transformers>=3.0.0
+
+# 경량 하이브리드 검색 (BM25 + RRF)
+rank-bm25>=0.2.2
+
+# LLM 클라이언트 (자연어 요약/자유입력 파싱 보조용 — 숫자 산출에는 미사용)
+anthropic>=0.40.0
+
+# 환경변수
+python-dotenv>=1.0.0
+
+# 테스트 / 린트
+pytest>=8.0.0
+pytest-asyncio>=0.24.0
+httpx>=0.27.0
+ruff>=0.6.0
