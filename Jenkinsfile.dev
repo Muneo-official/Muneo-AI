@@ -38,7 +38,17 @@ pipeline {
     stages {
         stage('Checkout deployment files') {
             steps {
-                checkout scm
+                script {
+                    def checkoutVars = checkout scm
+                    def checkedOutCommit = checkoutVars.GIT_COMMIT?.trim()
+                    if (!checkedOutCommit) {
+                        checkedOutCommit = sh(
+                            script: 'git rev-parse HEAD',
+                            returnStdout: true
+                        ).trim()
+                    }
+                    env.CHECKED_OUT_COMMIT = checkedOutCommit
+                }
             }
         }
 
@@ -46,13 +56,13 @@ pipeline {
             steps {
                 script {
                     def requestedTag = params.IMAGE_TAG?.trim()
-                    env.DEPLOY_IMAGE_TAG = requestedTag ?: env.GIT_COMMIT
+                    env.DEPLOY_IMAGE_TAG = requestedTag ?: env.CHECKED_OUT_COMMIT
                     env.AI_IMAGE_REF = "${env.GHCR_IMAGE}:${env.DEPLOY_IMAGE_TAG}"
                 }
                 sh '''
                     set -eu
 
-                    : "${DEPLOY_IMAGE_TAG:?Could not determine the image tag from IMAGE_TAG or GIT_COMMIT}"
+                    : "${DEPLOY_IMAGE_TAG:?Could not determine the image tag from IMAGE_TAG or checkout}"
                     : "${GHCR_IMAGE:?Provide the GHCR image name}"
                     : "${DEV01_HOST:?Configure DEV01_HOST in Jenkins}"
                     : "${DEV01_USER:?Configure DEV01_USER in Jenkins}"
