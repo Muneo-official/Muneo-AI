@@ -10,7 +10,8 @@
 //   muneo-dev01-ssh         SSH private key credential for the DEV host
 //   muneo-dev01-known-hosts Secret file containing the pinned DEV host key
 //
-// IMAGE_TAG must be the full commit SHA published by .github/workflows/dev-image.yml.
+// By default, deploy the checked-out dev commit SHA published by dev-image.yml.
+// IMAGE_TAG is only needed when explicitly deploying or rolling back to another published SHA.
 
 pipeline {
     agent { label 'docker-agent' }
@@ -30,7 +31,7 @@ pipeline {
         string(
             name: 'IMAGE_TAG',
             defaultValue: '',
-            description: 'DEV Image workflow가 GHCR에 게시한 40자리 full commit SHA'
+            description: '선택: 비우면 현재 dev 커밋 SHA 사용, 롤백 시에만 배포할 40자리 SHA 입력'
         )
     }
 
@@ -43,16 +44,21 @@ pipeline {
 
         stage('Validate deployment input') {
             steps {
+                script {
+                    def requestedTag = params.IMAGE_TAG?.trim()
+                    env.DEPLOY_IMAGE_TAG = requestedTag ?: env.GIT_COMMIT
+                    env.AI_IMAGE_REF = "${env.GHCR_IMAGE}:${env.DEPLOY_IMAGE_TAG}"
+                }
                 sh '''
                     set -eu
 
-                    : "${IMAGE_TAG:?Provide the full Git commit SHA as IMAGE_TAG}"
+                    : "${DEPLOY_IMAGE_TAG:?Could not determine the image tag from IMAGE_TAG or GIT_COMMIT}"
                     : "${GHCR_IMAGE:?Provide the GHCR image name}"
                     : "${DEV01_HOST:?Configure DEV01_HOST in Jenkins}"
                     : "${DEV01_USER:?Configure DEV01_USER in Jenkins}"
                     : "${DEV01_DEPLOY_PATH:?Configure DEV01_DEPLOY_PATH in Jenkins}"
 
-                    printf '%s\n' "${IMAGE_TAG}" | grep -Eq '^[0-9a-f]{40}$'
+                    printf '%s\n' "${DEPLOY_IMAGE_TAG}" | grep -Eq '^[0-9a-f]{40}$'
                     printf '%s\n' "${GHCR_IMAGE}" | grep -Eq '^ghcr[.]io/[a-z0-9._/-]+$'
                     printf '%s\n' "${DEV01_HOST}" | grep -Eq '^[A-Za-z0-9._-]+$'
                     printf '%s\n' "${DEV01_USER}" | grep -Eq '^[A-Za-z0-9._-]+$'
@@ -64,9 +70,6 @@ pipeline {
                     printf '%s\n' "${DEV01_SSH_PORT}" | grep -Eq '^[0-9]+$'
                     printf '%s\n' "${DEV_DOCKER_NETWORK}" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9_.-]*$'
                 '''
-                script {
-                    env.AI_IMAGE_REF = "${env.GHCR_IMAGE}:${params.IMAGE_TAG}"
-                }
             }
         }
 
