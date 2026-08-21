@@ -53,7 +53,7 @@ pipeline {
                     : "${DEV01_DEPLOY_PATH:?Configure DEV01_DEPLOY_PATH in Jenkins}"
 
                     printf '%s\n' "${IMAGE_TAG}" | grep -Eq '^[0-9a-f]{40}$'
-                    printf '%s\n' "${GHCR_IMAGE}" | grep -Eq '^ghcr\.io/[a-z0-9._/-]+$'
+                    printf '%s\n' "${GHCR_IMAGE}" | grep -Eq '^ghcr[.]io/[a-z0-9._/-]+$'
                     printf '%s\n' "${DEV01_HOST}" | grep -Eq '^[A-Za-z0-9._-]+$'
                     printf '%s\n' "${DEV01_USER}" | grep -Eq '^[A-Za-z0-9._-]+$'
                     printf '%s\n' "${DEV01_DEPLOY_PATH}" | grep -Eq '^/[A-Za-z0-9._/-]+$'
