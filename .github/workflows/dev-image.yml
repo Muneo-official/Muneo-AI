@@ -28,6 +28,11 @@ jobs:
           python-version: "3.12"
           cache: pip
 
+      # sentence-transformers가 기본 PyPI의 Linux Torch/CUDA 의존성을 끌어오지 않도록
+      # DEV 이미지와 동일한 CPU 전용 Torch를 먼저 설치한다. 모델 가중치는 테스트에서 받지 않는다.
+      - name: Install CPU PyTorch
+        run: pip install torch --index-url https://download.pytorch.org/whl/cpu
+
       - name: Install dependencies
         run: pip install -r requirements.txt
 
