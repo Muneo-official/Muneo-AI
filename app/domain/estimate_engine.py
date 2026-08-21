@@ -370,7 +370,7 @@ class EstimateEngine:
         self,
         case_repository: CaseRepository,
         embedder: SentenceTransformer,
-        reranker: CrossEncoder,
+        reranker: CrossEncoder | None,  # None이면 cross-encoder 재정렬 없이 RRF 순위를 그대로 쓴다
         vector_candidate_pool: int = 40,
         coefficients: dict | None = None,
     ):
@@ -586,9 +586,11 @@ class EstimateEngine:
         return dict(scores)
 
     async def _hybrid_rerank(self, query: str, cases: list[dict]) -> list[dict]:
-        """벡터 검색 후보 풀 → BM25 결합(RRF) → cross-encoder 재정렬 → 상위 TOP_K.
+        """벡터 검색 후보 풀 → BM25 결합(RRF) → (선택) cross-encoder 재정렬 → 상위 TOP_K.
 
         후보가 이미 TOP_K 이하면 리랭킹 의미가 없어 그대로 반환한다.
+        리랭커가 없으면(settings.use_reranker=False) 하이브리드까지만 수행하고
+        RRF 점수 상위 TOP_K를 반환한다 — BM25 결합은 어느 쪽이든 그대로 유지된다.
         """
         if len(cases) <= TOP_K:
             return cases
@@ -608,17 +610,21 @@ class EstimateEngine:
         rrf_scores = self._reciprocal_rank_fusion([vector_rank_ids, bm25_rank_ids])
         pool_ids = sorted(rrf_scores, key=rrf_scores.get, reverse=True)[:min(len(ids), RERANK_POOL)]
 
-        pairs = [(query, id_to_text[i]) for i in pool_ids]
-        ce_scores = await run_in_threadpool(self._reranker.predict, pairs)
+        if self._reranker is None:
+            reranked = [id_to_case[i] for i in pool_ids]
+        else:
+            pairs = [(query, id_to_text[i]) for i in pool_ids]
+            ce_scores = await run_in_threadpool(self._reranker.predict, pairs)
 
-        order = sorted(range(len(pool_ids)), key=lambda i: ce_scores[i], reverse=True)
-        reranked = [id_to_case[pool_ids[i]] for i in order]
+            order = sorted(range(len(pool_ids)), key=lambda i: ce_scores[i], reverse=True)
+            reranked = [id_to_case[pool_ids[i]] for i in order]
 
         log_event(
             "hybrid_rerank",
             candidate_pool=len(cases),
             rrf_pool=len(pool_ids),
             final=min(len(reranked), TOP_K),
+            reranked=self._reranker is not None,
         )
         return reranked[:TOP_K]
 

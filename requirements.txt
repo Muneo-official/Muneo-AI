@@ -1,28 +1,36 @@
+# 버전 고정 — 재현 가능한 빌드를 위해 직접 의존성은 전부 `==`로 핀한다.
+# (현재 개발 환경에 설치된 버전 기준)
+#
+# 주의: torch는 여기 없다. Dockerfile이 CPU 전용 인덱스에서 먼저 설치한다
+# (PyPI 기본 휠은 CUDA 포함이라 2.5GB+). 로컬/CI에서도 같은 방식으로 먼저 설치할 것.
+
 # API 서버
-fastapi>=0.115.0
-uvicorn[standard]>=0.30.0
-pydantic>=2.9.0
-pydantic-settings>=2.5.0
-slowapi>=0.1.9
+fastapi==0.141.1
+uvicorn[standard]==0.52.3
+pydantic==2.13.4
+pydantic-settings==2.15.0
+slowapi==0.1.10
 
 # MongoDB (Atlas, $vectorSearch)
-motor>=3.5.0
-pymongo>=4.7.0
+motor==3.7.1
+pymongo==4.17.0
 
-# 임베딩 (로컬 계산, 외부 API 불필요)
-sentence-transformers>=3.0.0
+# 임베딩 / 리랭킹 (로컬 계산, 외부 API 불필요)
+sentence-transformers==5.7.0
+transformers==5.15.0  # 전이 의존성이지만 모델 로딩 동작에 직접 영향이 커서 같이 핀한다
 
 # 경량 하이브리드 검색 (BM25 + RRF)
-rank-bm25>=0.2.2
-
-# LLM 클라이언트 (자연어 요약/자유입력 파싱 보조용 — 숫자 산출에는 미사용)
-anthropic>=0.40.0
+rank-bm25==0.2.2
 
 # 환경변수
-python-dotenv>=1.0.0
+python-dotenv==1.2.2
+
+# LLM 클라이언트 — 현재 코드 어디에서도 import하지 않는다 (app/core/config.py의
+# anthropic_api_key 설정만 존재). 자연어 요약/자유입력 파싱을 붙일 때 주석을 해제할 것.
+# anthropic==0.40.0
 
 # 테스트 / 린트
-pytest>=8.0.0
-pytest-asyncio>=0.24.0
-httpx>=0.27.0
-ruff>=0.6.0
+pytest==9.1.1
+pytest-asyncio==1.4.0
+httpx==0.28.1
+ruff==0.16.3

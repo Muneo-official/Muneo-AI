@@ -5,6 +5,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from sentence_transformers import CrossEncoder, SentenceTransformer
 
 from app.core.config import get_settings
+from app.core.logging import log_event
 from app.domain.estimate_engine import EstimateEngine
 from app.repositories.case_repository import CaseRepository
 from app.repositories.coefficient_repository import CoefficientRepository
@@ -28,7 +29,10 @@ async def lifespan(app: FastAPI):
         serverSelectionTimeoutMS=settings.mongo_server_selection_timeout_ms,
     )
     embedder = SentenceTransformer(settings.embed_model)
-    reranker = CrossEncoder(settings.reranker_model, max_length=512)
+    # use_reranker=False면 CrossEncoder를 생성하지 않는다 — 단순히 호출을 건너뛰는 게 아니라
+    # 약 2.2GB짜리 가중치를 내려받지도, 메모리에 올리지도 않는 게 목적이다.
+    reranker = CrossEncoder(settings.reranker_model, max_length=512) if settings.use_reranker else None
+    log_event("model_loaded", embed_model=settings.embed_model, use_reranker=settings.use_reranker)
     case_repository = CaseRepository(
         collection=mongo_client[settings.mongo_db_name]["estimate_cases"],
         settings=settings,

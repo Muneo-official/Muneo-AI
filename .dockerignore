@@ -1,0 +1,26 @@
+# 빌드 컨텍스트에서 제외 — .venv만 1.4GB라 없으면 build가 그만큼 느려진다.
+.venv/
+venv/
+.git/
+.github/
+.idea/
+.vscode/
+.claude/
+
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# 시크릿이 이미지에 들어가지 않도록. 런타임에 --env-file / 오케스트레이터 시크릿으로 주입한다.
+.env
+.env.*
+!.env.example
+
+logs/
+docs/
+tests/
+eval/test_inputs/
+*.md
+!README.md

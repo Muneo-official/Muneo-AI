@@ -15,8 +15,12 @@ jobs:
         with:
           python-version: "3.12"
 
+      # torch를 CPU 전용 인덱스에서 먼저 설치한다. 이 단계가 없으면 sentence-transformers가
+      # PyPI 기본 휠(CUDA 포함, 2.5GB+)을 끌고 와서 매 push마다 CI가 크게 느려진다.
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt
 
       - name: Lint (ruff)
         run: ruff check app tests scripts eval
