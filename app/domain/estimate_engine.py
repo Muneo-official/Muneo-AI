@@ -805,11 +805,19 @@ class EstimateEngine:
         주방_선택 = "주방" in 공종들
         가구_선택 = "가구" in 공종들
 
+        # cost_가구는 case별로 "가구공사" 카테고리 원가 전체를 담는 단일 필드라, 주방(싱크대 등)과
+        # 가구(붙박이장 등)가 같은 case 안에 같이 있으면 두 출력 카테고리에 같은 금액이 중복
+        # 집계된다 — 둘 다 선택됐을 때만 분배가 필요하다.
+        # 60/40(주방/가구) 비율은 검증된 값이 아니다 — Atlas 데이터 확인 결과 실제로 같은 case에
+        # 주방+가구가 함께 잡히는 경우는 드물고(3건), 그 3건에서는 오히려 가구 쪽이 더 컸다(~58%).
+        # 표본이 3건뿐이라 정밀한 재조정은 보류하고, 방향이 의심스럽다는 것만 남겨둔다.
+        # TODO: 더 많은 라벨링 데이터로 실제 분배 비율 재검증 필요.
         if 주방_선택 and 가구_선택:
             result["주방"] = (0.60, ["주방·가구 동시 선택 — 주방(싱크대 등) 60% 배분"])
             result["가구"] = (0.40, ["주방·가구 동시 선택 — 가구(붙박이 등) 40% 배분"])
-        elif 가구_선택:
-            result["가구"] = (0.40, ["가구(붙박이·신발장) 단독 선택 (~40% 적용)"])
+        # 가구만 선택된 경우엔 분배가 아예 불필요하다 — Atlas 데이터 확인 결과 cost_가구가
+        # 있는 case의 71%(46/65)는 주방 항목 없이 순수 가구 비용만 담고 있어서, 이전처럼
+        # 무조건 40%로 깎으면 대부분의 케이스에서 이미 맞는 값을 근거 없이 반토막 냈다.
 
         return result
 
@@ -818,7 +826,9 @@ class EstimateEngine:
     @staticmethod
     def cost_range(values, max_ratio: float = None):
         """IQR 기반 범위: 최솟값=P25, 최댓값=P75, 중간=전체 중앙값.
-        max_ratio 지정 시 P75/P25 비율을 해당 값으로 클램프."""
+        max_ratio 지정 시 P75/P25 비율을 해당 값으로 클램프한다 — 단, P25가
+        이상치로 유독 낮으면 클램프된 hi가 mid보다 작아져 중간값 자체가
+        끌려 내려가는 문제가 있었다. hi를 mid 아래로는 절대 낮추지 않는다."""
         if not values:
             return None
         s = sorted(values)
@@ -830,8 +840,7 @@ class EstimateEngine:
             lo = s[n // 4]
             hi = s[(3 * n) // 4]
         if max_ratio is not None and lo > 0 and hi > lo * max_ratio:
-            hi = int(lo * max_ratio)
-        mid = max(lo, min(mid, hi))
+            hi = max(int(lo * max_ratio), mid)
         return {"최소": lo, "최대": hi, "중간": mid}
 
     # ── 7. 최종 가견적 생성 ──────────────────────────────
