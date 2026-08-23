@@ -9,8 +9,11 @@ from pydantic import BaseModel, Field
 ]
 
 
+도배_범위_리터럴 = Literal["전체", "거실", "침실", "주방"]
+
+
 class 도배옵션(BaseModel):
-    범위: str | list[str] = "전체"
+    범위: 도배_범위_리터럴 | list[도배_범위_리터럴] = "전체"
     도배지종류: str = "실크벽지"
     초배포함: str | None = None
 
