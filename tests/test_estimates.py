@@ -126,6 +126,20 @@ async def test_generate_estimate_invalid_body_returns_422(client: AsyncClient):
     mock_engine.generate.assert_not_awaited()
 
 
+async def test_generate_estimate_invalid_wallpaper_range_returns_422(client: AsyncClient):
+    # 도배.범위는 전체/거실/침실/주방만 허용 — 그 외 값(예: "부분")은 엔진에서 5% 최저치로
+    # 조용히 폴백되던 과거 버그가 있었다. 이제 Pydantic 단에서 막아야 한다.
+    mock_engine = AsyncMock()
+    app.dependency_overrides[get_engine] = lambda: mock_engine
+    app.dependency_overrides[get_pending_estimate_repository] = lambda: _mock_pending_repo()
+
+    body = {**VALID_REQUEST, "도배": {"범위": "부분"}}
+    resp = await client.post("/estimates/generate", json=body, headers=USER_HEADER)
+
+    assert resp.status_code == 422
+    mock_engine.generate.assert_not_awaited()
+
+
 async def test_save_estimate_success(client: AsyncClient):
     mock_estimate_repo = AsyncMock()
     mock_estimate_repo.save.return_value = "665f1a2b3c4d5e6f7a8b9c0d"
