@@ -27,6 +27,10 @@ from app.repositories.case_repository import CaseRepository
 ENGINE_VERSION     = "1.0.0"  # 저장된 견적의 재현성 추적용 (estimates.engine_version)
 TOP_K              = 15   # 최종 유사 사례 수 (리랭킹 이후)
 RERANK_POOL        = 20   # RRF 결합 이후, cross-encoder에 넣을 후보 수
+CASE_TEXT_REQUEST_CAP = 60  # _case_text()의 요청글 트렁케이션 길이. 캡이 넉넉할수록(예: 300)
+                            # cross-encoder가 텍스트 길이 자체에 편향돼 순위를 왜곡한다는 게
+                            # 확인됨(eval/results/reranker_hybrid_eval.md) — 60이 벡터 단독
+                            # 대비 precision@5/10 전부 개선되는 것으로 검증된 값.
 SIZE_RANGE         = 7    # 평수 ±7평 필터
 MAX_SPEC_ITEMS     = 12   # 공종별 명세 최대 항목 수 (ancillary 제외)
 SPEC_RATIO         = 0.15 # 비정규화 항목 등장 비율 threshold (전체 사례 수 × 비율)
@@ -569,7 +573,7 @@ class EstimateEngine:
         request_text = (case.get("request_body_text") or "").strip()
         header = " ".join(filter(None, [f"{size}평", region, " ".join(works), "리모델링"]))
         if request_text:
-            return f"{header}\n{request_text[:300]}"
+            return f"{header}\n{request_text[:CASE_TEXT_REQUEST_CAP]}"
         return header
 
     @staticmethod
