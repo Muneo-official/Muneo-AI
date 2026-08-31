@@ -28,6 +28,8 @@ CATEGORY_NORM: dict[str, str] = {
     "필름공사": "필름", "시트공사": "필름",      # 필름·시트는 동일 공종
     "도장공사": "도장",
     "폐기물처리": "철거",
+    "기타/공과잡비": "공과잡비",                 # pipeline/prompts.py 규칙7에서 신설한 표준 카테고리
+    "확장공사": "확장",                          # 기존 12개 공종 어디에도 안 맞아 별도 버킷으로 분리
 }
 
 def normalize_category(raw: str) -> str | None:
