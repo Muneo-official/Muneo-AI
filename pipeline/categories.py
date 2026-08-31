@@ -42,7 +42,14 @@ def normalize_category(raw: str) -> str | None:
     실제 데이터에서 이런 복합 표기가 2,530건의 미인식 category 중 상당수를 차지했다
     (scripts/validate_existing_cases.py 결과) — 조합을 하나하나 하드코딩하는 대신
     일반 규칙으로 처리해 앞으로 나올 새 조합에도 대응한다.
+
+    입력이 이미 정규화된 값(NORMALIZED_CATEGORIES)이면 그대로 반환한다 — pipeline/tool_schema.py
+    의 tool use는 CATEGORY_NORM의 원본 표기가 아니라 이미 정규화된 값을 직접 출력하므로
+    (예: "가구공사"가 아니라 "가구"), 이 경우를 놓치면 정상 데이터가 unknown_category로
+    잘못 잡힌다(pipeline/results/vision_api_integration.md에서 실제로 발견된 버그).
     """
+    if raw in NORMALIZED_CATEGORIES:
+        return raw
     if raw in CATEGORY_NORM:
         return CATEGORY_NORM[raw]
     if "," in raw:
