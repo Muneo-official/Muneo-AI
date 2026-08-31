@@ -42,14 +42,29 @@ def test_total_consistency_exceeding_tolerance_flags_warning():
     assert issues[0].severity == "warning"
 
 
-def test_unknown_category_flags_warning():
+def test_unknown_category_majority_of_cost_flags_error():
     parsed = ParsedEstimate.model_validate({
         "total_cost": 100_000,
         "line_items": [_line_item("냉난방공사", "에어컨 설치", 100_000)],
     })
     issues = validate_known_categories(parsed)
     assert len(issues) == 1
+    assert issues[0].severity == "error"
     assert "냉난방공사" in issues[0].message
+
+
+def test_unknown_category_small_ratio_of_cost_has_no_issue():
+    # 실제 데이터로 확인된 문제: "기타공사"/"단가참고" 같은 사소한 미분류 항목이 몇 개
+    # 섞였다고 케이스 전체를 못 미덥게 볼 필요는 없다 — 금액 비중이 작으면(여기선 5%)
+    # 이슈로 잡지 않아야 한다 (개수 기반 페널티였던 이전 로직에서는 이것도 걸렸음).
+    parsed = ParsedEstimate.model_validate({
+        "total_cost": 1_000_000,
+        "line_items": [
+            _line_item("도배공사", "실크벽지", 950_000),
+            _line_item("단가참고", "OOO 기준", 50_000),
+        ],
+    })
+    assert validate_known_categories(parsed) == []
 
 
 def test_door_category_furniture_keyword_suggests_reclassification():
