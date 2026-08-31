@@ -1,4 +1,4 @@
-from pipeline.parsing import merge_and_validate, merge_parsed_results
+from pipeline.parsing import merge_and_validate, merge_chunk_results, merge_parsed_results
 
 
 def _result(total_cost: int, line_items: list[dict]) -> dict:
@@ -58,3 +58,25 @@ def test_merge_and_validate_flags_size_pyeong_corruption_immediately():
 
 def test_merge_and_validate_empty_results_returns_empty():
     assert merge_and_validate([{"is_estimate": False}], size_pyeong=30) == {}
+
+
+def test_merge_chunk_results_dedups_overlap_between_chunks():
+    # 세로로 긴 이미지를 200px 겹침으로 나누면 같은 행이 두 청크에 걸쳐 두 번 나올 수
+    # 있다 — (category, amount, unit_price) 조합으로 중복 제거돼야 한다.
+    chunk1 = _result(1_000_000, [_item("도배공사", "실크벽지", 900_000)])
+    chunk2 = _result(1_000_000, [_item("도배공사", "실크벽지", 900_000)])  # 겹침 구간 재파싱
+    merged = merge_chunk_results([chunk1, chunk2])
+    assert len(merged["line_items"]) == 1
+
+
+def test_merge_chunk_results_uses_max_total_cost_across_chunks():
+    # 합계 행은 보통 마지막 청크에만 보인다 — 다른 청크는 total_cost=0일 수 있음
+    chunk1 = _result(0, [_item("도배공사", "실크벽지", 900_000)])
+    chunk2 = _result(1_000_000, [_item("타일공사", "욕실타일", 100_000)])
+    merged = merge_chunk_results([chunk1, chunk2])
+    assert merged["total_cost"] == 1_000_000
+    assert len(merged["line_items"]) == 2
+
+
+def test_merge_chunk_results_no_estimate_returns_is_estimate_false():
+    assert merge_chunk_results([{"is_estimate": False}]) == {"is_estimate": False}

@@ -151,6 +151,40 @@ def _calc_consistency(r: dict) -> float:
     return abs(line_sum - total) / total
 
 
+def merge_chunk_results(chunk_results: list[dict]) -> dict:
+    """세로로 길어 여러 청크로 쪼개 파싱한 **같은 이미지**의 결과를 하나로 합친다.
+
+    merge_parsed_results()는 서로 다른 이미지(페이지)를 합치는 함수라 총금액이 다르면
+    "독립된 견적서가 섞였다"고 판단해 하나만 골라버린다 — 청크는 애초에 같은 이미지의
+    일부라 그 판단이 적용되면 안 된다. 대신 청크마다 나온 (category, amount, unit_price)
+    조합으로 중복만 제거하고, total_cost는 청크 중 가장 큰 값(합계 행이 찍힌 청크)을 쓴다.
+    """
+    seen = set()
+    all_items = []
+    max_total = 0
+
+    for r in chunk_results:
+        if not r.get("is_estimate"):
+            continue
+        total = int(r.get("total_cost") or 0)
+        if total > max_total:
+            max_total = total
+        for item in r.get("line_items", []):
+            if not item.get("amount"):
+                continue
+            key = _chunk_dedup_key(item)
+            if key not in seen:
+                seen.add(key)
+                all_items.append(item)
+
+    if not all_items:
+        return {"is_estimate": False}
+    all_items = [_fix_column_swap(it) for it in all_items]
+    all_items = _remove_aggregate_items(all_items, max_total)
+    result = {"is_estimate": True, "total_cost": max_total, "line_items": all_items}
+    return _add_consistency_warning(result)
+
+
 def merge_parsed_results(results: list[dict]) -> dict:
     """여러 이미지 파싱 결과를 하나의 parsed_estimate로 병합.
 
