@@ -32,6 +32,9 @@ CATEGORY_NORM: dict[str, str] = {
     "확장공사": "확장",                          # 기존 12개 공종 어디에도 안 맞아 별도 버킷으로 분리
 }
 
+NORMALIZED_CATEGORIES: tuple[str, ...] = tuple(sorted(set(CATEGORY_NORM.values())))
+
+
 def normalize_category(raw: str) -> str | None:
     """CATEGORY_NORM 직접 조회 실패 시, 쉼표로 결합된 복합 표기("목공,도어",
     "철거,설비공사" 등)를 분해해 첫 번째로 인식되는 토큰을 사용한다.
