@@ -71,19 +71,38 @@ def validate_total_consistency(parsed: ParsedEstimate) -> list[ValidationIssue]:
     return []
 
 
+UNKNOWN_CATEGORY_ERROR_RATIO = 0.5   # 미인식 category가 total_cost의 이 비율을 넘으면 error
+UNKNOWN_CATEGORY_WARNING_RATIO = 0.2  # 이 비율을 넘으면 warning, 그 이하는 이슈로 안 봄
+
+
 def validate_known_categories(parsed: ParsedEstimate) -> list[ValidationIssue]:
     """CATEGORY_NORM(+ normalize_category의 쉼표 분해)으로도 인식 못 하는 category는
-    build_category_costs()에서 조용히 버려진다(pipeline/reference/build_rag.py:184) —
-    그 데이터 유실을 여기서 드러낸다."""
-    issues = []
-    unknown = {item.category for item in parsed.line_items if normalize_category(item.category) is None}
-    for cat in sorted(unknown):
-        issues.append(ValidationIssue(
-            rule="unknown_category",
-            severity="warning",
-            message=f"category={cat!r}이(가) 알려진 표기 목록에 없음 — cost_* 집계에서 조용히 누락됨",
-        ))
-    return issues
+    build_category_costs()에서 조용히 버려진다(pipeline/reference/build_rag.py:184).
+
+    처음엔 미인식 category 개수만큼 이슈를 냈는데("기타공사"/"단가참고" 등 4개만 섞여도
+    -0.4), 실제 데이터에 돌려보니 신뢰도가 낮게 나온 사례의 77%가 순수히 이 개수 페널티
+    때문이었다(전체 스키마/평수 오류는 별도로 14건뿐) — 케이스 하나에 사소한 미분류
+    항목이 여러 개 있다고 해서 그 케이스 전체가 못 미더운 건 아니다. **개수가 아니라
+    total_cost 대비 금액 비중**으로 판단하도록 고쳤다: 참고 사례로서의 신뢰도는
+    "이름 모를 카테고리가 몇 종류 있냐"가 아니라 "그게 견적 전체에서 얼마나 큰
+    비중이냐"로 결정돼야 한다.
+    """
+    if parsed.total_cost <= 0:
+        return []
+
+    unknown_amount = sum(item.amount for item in parsed.line_items if normalize_category(item.category) is None)
+    ratio = unknown_amount / parsed.total_cost
+    if ratio <= UNKNOWN_CATEGORY_WARNING_RATIO:
+        return []
+
+    unknown_cats = sorted({item.category for item in parsed.line_items if normalize_category(item.category) is None})
+    severity: Severity = "error" if ratio > UNKNOWN_CATEGORY_ERROR_RATIO else "warning"
+    return [ValidationIssue(
+        rule="unknown_category",
+        severity=severity,
+        message=f"미인식 category가 total_cost의 {ratio:.0%}를 차지함 ({', '.join(unknown_cats)}) "
+                 "— cost_* 집계에서 조용히 누락됨",
+    )]
 
 
 def suggest_door_reclassification(parsed: ParsedEstimate) -> list[dict]:
