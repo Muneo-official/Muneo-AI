@@ -15,6 +15,7 @@ from dataclasses import dataclass
 
 import anthropic
 
+from pipeline.crawl_filter import is_boilerplate
 from pipeline.image_prep import prepare_chunks
 from pipeline.vision_client import build_api_params
 
@@ -35,12 +36,18 @@ def build_batch_requests(
 
     custom_id 형식: "{article_id}__{image_index}__{chunk_index}" — 결과 수집 시
     이 셋으로 원래 위치를 복원한다.
+
+    알려진 보일러플레이트(pipeline/crawl_filter.py)는 아예 요청 목록에 안 넣는다 —
+    배치 요청 자체를 줄여야 실제 비용 절감이 되므로, tool use 응답에서 걸러내는 것보다
+    여기서 미리 빼는 게 맞다.
     """
     requests: list[dict] = []
     meta: dict[str, RequestMeta] = {}
 
     for article_id, image_paths in articles:
         for img_idx, path in enumerate(image_paths):
+            if is_boilerplate(path):
+                continue
             for chunk_idx, chunk_bytes in enumerate(prepare_chunks(path)):
                 custom_id = f"{article_id}__{img_idx}__{chunk_idx}"
                 requests.append({"custom_id": custom_id, "params": build_api_params(chunk_bytes)})

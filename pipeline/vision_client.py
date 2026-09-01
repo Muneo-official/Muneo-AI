@@ -12,6 +12,7 @@ import base64
 
 import anthropic
 
+from pipeline.crawl_filter import is_boilerplate
 from pipeline.image_prep import prepare_chunks
 from pipeline.parsing import merge_chunk_results
 from pipeline.tool_schema import ESTIMATE_TOOL, TOOL_NAME, TOOL_USE_INSTRUCTIONS
@@ -65,7 +66,15 @@ def call_vision_api(image_bytes: bytes, client: anthropic.Anthropic | None = Non
 
 
 def parse_image(image_path: str, client: anthropic.Anthropic | None = None) -> dict:
-    """이미지 1장을 파싱한다. SPLIT_HEIGHT_THRESHOLD를 넘으면 자동으로 청크 분할 후 병합."""
+    """이미지 1장을 파싱한다. SPLIT_HEIGHT_THRESHOLD를 넘으면 자동으로 청크 분할 후 병합.
+
+    알려진 보일러플레이트(로고·뱃지·완성 견본 사진 등, pipeline/crawl_filter.py)면
+    API 호출 없이 즉시 반환한다 — 실제 크롤링 데이터의 40.3%가 이런 반복 파일이었다
+    (pipeline/results/crawl_prefilter.md).
+    """
+    if is_boilerplate(image_path):
+        return {"is_estimate": False}
+
     client = client or get_client()
     chunks = prepare_chunks(image_path)
     chunk_results = [call_vision_api(c, client) for c in chunks]
