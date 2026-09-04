@@ -35,6 +35,7 @@ Pillow==12.3.0
 # 크롤링 (pipeline/crawler.py — Selenium 오케스트레이션, pipeline/crawl_parsing.py — HTML 파싱)
 selenium==4.48.0
 beautifulsoup4==4.15.0
+requests==2.34.2  # pipeline/crawl_download.py — 이미지 다운로드
 
 # 테스트 / 린트
 pytest==9.1.1
