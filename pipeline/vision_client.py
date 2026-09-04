@@ -9,6 +9,7 @@ Anthropic API를 실제로 호출하는 모듈이라 API 키 없이는 단위테
 """
 
 import base64
+import os
 
 import anthropic
 
@@ -24,10 +25,18 @@ _client: anthropic.Anthropic | None = None
 
 
 def get_client() -> anthropic.Anthropic:
-    """지연 초기화 — 이 모듈을 import하는 것만으로 ANTHROPIC_API_KEY를 요구하지 않는다."""
+    """지연 초기화 — 이 모듈을 import하는 것만으로 ANTHROPIC_API_KEY를 요구하지 않는다.
+
+    identity-linked API 키(여러 workspace에 걸친 조직 계정 키)는 어느 workspace로
+    요청을 실행할지 anthropic-workspace-id 헤더로 명시해야 한다 — 특히 Batches API에서
+    "anthropic-workspace-id is required..." 400 에러로 드러난다. .env에
+    ANTHROPIC_WORKSPACE_ID가 있으면 자동으로 헤더에 실어 보낸다.
+    """
     global _client
     if _client is None:
-        _client = anthropic.Anthropic()
+        workspace_id = os.environ.get("ANTHROPIC_WORKSPACE_ID")
+        default_headers = {"anthropic-workspace-id": workspace_id} if workspace_id else None
+        _client = anthropic.Anthropic(default_headers=default_headers)
     return _client
 
 
