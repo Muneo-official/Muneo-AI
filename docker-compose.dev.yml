@@ -1,0 +1,38 @@
+name: muneo-ai-dev
+
+services:
+  ai:
+    image: ${AI_IMAGE:?AI_IMAGE is required}
+    container_name: ${AI_CONTAINER_NAME:-muneo-ai-dev}
+    restart: unless-stopped
+    init: true
+    # dev01 4GiB 시험 운영에서는 호스트 OOM 발생 시 DB/Redis/Spring보다 AI가 먼저
+    # 종료 후보가 되도록 우선순위를 낮춘다. 메모리 사용량 자체를 줄이는 제한은 아니다.
+    oom_score_adj: 500
+    env_file:
+      - ${AI_ENV_FILE:-.env}
+    environment:
+      # 공유 DEV 호스트에서 CPU 스레드와 glibc arena가 과도하게 늘어나는 것을 억제한다.
+      # 모델 가중치가 차지하는 RAM은 줄어들지 않는다.
+      OMP_NUM_THREADS: ${AI_OMP_NUM_THREADS:-1}
+      MKL_NUM_THREADS: ${AI_MKL_NUM_THREADS:-1}
+      TOKENIZERS_PARALLELISM: "false"
+      MALLOC_ARENA_MAX: ${AI_MALLOC_ARENA_MAX:-2}
+    volumes:
+      - model_cache:/home/ai/.cache/huggingface
+      - app_logs:/app/logs
+    networks:
+      internal:
+        aliases:
+          - ai
+
+volumes:
+  model_cache:
+    name: ${AI_MODEL_CACHE_VOLUME:-muneo-ai-model-cache-dev}
+  app_logs:
+    name: ${AI_LOG_VOLUME:-muneo-ai-logs-dev}
+
+networks:
+  internal:
+    external: true
+    name: ${DEV_DOCKER_NETWORK:-muneo-dev-internal}

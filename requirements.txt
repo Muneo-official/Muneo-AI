@@ -25,9 +25,17 @@ rank-bm25==0.2.2
 # 환경변수
 python-dotenv==1.2.2
 
-# LLM 클라이언트 — 현재 코드 어디에서도 import하지 않는다 (app/core/config.py의
-# anthropic_api_key 설정만 존재). 자연어 요약/자유입력 파싱을 붙일 때 주석을 해제할 것.
-# anthropic==0.40.0
+# LLM 클라이언트 — pipeline/vision_client.py, pipeline/batch_client.py의 견적서 이미지
+# Vision 파싱에 사용 (app/core/config.py의 anthropic_api_key와 동일한 키)
+anthropic==1.2.0
+
+# 이미지 전처리 (pipeline/image_prep.py — 파싱 전 리사이즈·청크 분할)
+Pillow==12.3.0
+
+# 크롤링 (pipeline/crawler.py — Selenium 오케스트레이션, pipeline/crawl_parsing.py — HTML 파싱)
+selenium==4.48.0
+beautifulsoup4==4.15.0
+requests==2.34.2  # pipeline/crawl_download.py — 이미지 다운로드
 
 # 테스트 / 린트
 pytest==9.1.1

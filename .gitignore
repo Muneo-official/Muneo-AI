@@ -15,8 +15,17 @@ venv/
 # logs
 logs/
 
+# DB 백업
+backups/
+
+# 크롤링 원본 데이터
+estimate_data/
+
 # internal docs (not for public repo)
 docs/
+
+# 기존 종합프로젝트에서 참고용으로 가져온 원본 코드 (커밋 대상 아님)
+pipeline/reference/
 
 # IDE
 .idea/

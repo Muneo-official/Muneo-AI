@@ -37,7 +37,7 @@ load_dotenv()
 QUERIES_PATH = pathlib.Path(__file__).parent / "test_inputs" / "queries.json"
 POOL_JSON_PATH = pathlib.Path(__file__).parent / "test_inputs" / "pool.json"
 
-K_VALUES = [5, 10]
+K_VALUES = [5, 10, 15]  # 15는 app/domain/estimate_engine.py의 TOP_K(실제 프로덕션 최종 후보 수)와 일치
 
 
 def precision_at_k(ranked_ids: list[str], labels: dict[str, int], k: int) -> float:
