@@ -18,6 +18,9 @@ logs/
 # DB 백업
 backups/
 
+# 크롤링 원본 데이터
+estimate_data/
+
 # internal docs (not for public repo)
 docs/
 
