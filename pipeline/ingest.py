@@ -29,17 +29,13 @@ def load_article_record(article_dir: str) -> dict:
     return json.loads(json_path.read_text(encoding="utf-8"))
 
 
-def process_article(article_dir: str) -> dict:
-    """폴더 하나를 읽어 파싱·검증·집계까지 끝낸 최종 레코드를 반환한다 (DB 저장은 안 함).
+def finalize_record(record: dict, per_image_results: list[dict]) -> dict:
+    """이미지별 파싱 결과(per_image_results)를 record에 병합·검증·집계해 채운다.
 
-    반환 레코드는 app/domain/estimate_engine.py가 실제로 읽는 필드(has_*, cost_*,
-    total_cost, cost_per_pyeong, parsed_estimate)를 그대로 담는다 — 파싱만 하고 이
-    필드들을 안 채우면 저장은 되지만 견적 엔진이 참고 사례로 못 쓴다.
+    실시간 파싱(process_article)과 배치 파싱(scripts/run_ingest.py --batch collect)이
+    "이미지를 어떻게 파싱했는가"만 다르고 그 이후(병합→검증→집계) 로직은 완전히 같아서
+    이 함수로 공유한다.
     """
-    record = load_article_record(article_dir)
-    image_paths = record.get("local_images") or []
-    per_image_results = [parse_image(p) for p in image_paths]
-
     size_pyeong = int(record.get("size_pyeong") or 0)
     validated = merge_and_validate(per_image_results, size_pyeong)
 
@@ -61,19 +57,35 @@ def process_article(article_dir: str) -> dict:
     return record
 
 
-async def ingest_article(
+def process_article(article_dir: str) -> dict:
+    """폴더 하나를 읽어 파싱·검증·집계까지 끝낸 최종 레코드를 반환한다 (DB 저장은 안 함).
+
+    반환 레코드는 app/domain/estimate_engine.py가 실제로 읽는 필드(has_*, cost_*,
+    total_cost, cost_per_pyeong, parsed_estimate)를 그대로 담는다 — 파싱만 하고 이
+    필드들을 안 채우면 저장은 되지만 견적 엔진이 참고 사례로 못 쓴다.
+
+    실시간(Vision API 즉시 호출) 경로다. 물량이 많아 배치로 처리하고 싶으면
+    finalize_record()를 배치 결과와 함께 직접 호출한다(scripts/run_ingest.py 참고).
+    """
+    record = load_article_record(article_dir)
+    image_paths = record.get("local_images") or []
+    per_image_results = [parse_image(p) for p in image_paths]
+    return finalize_record(record, per_image_results)
+
+
+async def route_and_save(
+    record: dict,
     article_dir: str,
     cases_col: AsyncIOMotorCollection,
     queue_col: AsyncIOMotorCollection,
 ) -> str:
-    """process_article() 결과를 신뢰도에 따라 estimate_cases/review_queue에 저장한다.
+    """finalize_record() 결과를 신뢰도에 따라 estimate_cases/review_queue에 저장한다.
 
     parsed_estimate가 아예 없으면(모든 이미지가 견적서가 아니었거나 보일러플레이트만
     있었던 경우) 무조건 review_queue로 보낸다 — confidence 계산 자체가 안 되기 때문.
 
     반환값: 실제로 저장된 컬렉션 이름("estimate_cases" 또는 "review_queue").
     """
-    record = process_article(article_dir)
     validation = record.get("_validation")
 
     if not record.get("parsed_estimate"):
@@ -85,3 +97,17 @@ async def ingest_article(
     col = cases_col if destination == "estimate_cases" else queue_col
     await col.update_one({"article_id": record["article_id"]}, {"$set": record}, upsert=True)
     return destination
+
+
+async def ingest_article(
+    article_dir: str,
+    cases_col: AsyncIOMotorCollection,
+    queue_col: AsyncIOMotorCollection,
+) -> str:
+    """process_article()(실시간 파싱)으로 레코드를 만들어 라우팅·저장까지 끝낸다.
+
+    배치 파싱 결과로 같은 일을 하려면 finalize_record() + route_and_save()를 직접
+    조합한다(scripts/run_ingest.py의 배치 collect 경로 참고).
+    """
+    record = process_article(article_dir)
+    return await route_and_save(record, article_dir, cases_col, queue_col)
