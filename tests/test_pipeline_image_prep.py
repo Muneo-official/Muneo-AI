@@ -1,3 +1,4 @@
+import io
 import pathlib
 
 from PIL import Image
@@ -7,6 +8,7 @@ from pipeline.image_prep import (
     MAX_PARSE_WIDTH,
     SPLIT_HEIGHT_THRESHOLD,
     prepare_chunks,
+    prepare_chunks_from_bytes,
     resize_for_parse,
     split_vertically,
 )
@@ -57,3 +59,22 @@ def test_prepare_chunks_splits_tall_image(tmp_path: pathlib.Path):
     assert len(chunks) == 2
     for c in chunks:
         assert isinstance(c, bytes)
+
+
+def _png_bytes(size: tuple[int, int]) -> bytes:
+    buf = io.BytesIO()
+    Image.new("RGB", size).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def test_prepare_chunks_from_bytes_returns_single_chunk_for_short_image():
+    raw = _png_bytes((700, SPLIT_HEIGHT_THRESHOLD - 1))
+    chunks = prepare_chunks_from_bytes(raw)
+    assert len(chunks) == 1
+    assert isinstance(chunks[0], bytes)
+
+
+def test_prepare_chunks_from_bytes_splits_tall_image_same_as_path_variant():
+    raw = _png_bytes((700, SPLIT_HEIGHT_THRESHOLD + 100))
+    chunks = prepare_chunks_from_bytes(raw)
+    assert len(chunks) == 2
