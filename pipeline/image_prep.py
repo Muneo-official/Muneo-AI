@@ -40,9 +40,8 @@ def split_vertically(img: Image.Image) -> list[Image.Image]:
     return chunks
 
 
-def prepare_chunks(image_path: str) -> list[bytes]:
-    """이미지를 로드·리사이즈·(필요시) 분할하여 PNG bytes 리스트로 반환."""
-    img = resize_for_parse(Image.open(image_path))
+def _prepare_chunks(img: Image.Image) -> list[bytes]:
+    img = resize_for_parse(img)
     _, h = img.size
     pieces = [img] if h <= SPLIT_HEIGHT_THRESHOLD else split_vertically(img)
 
@@ -52,3 +51,17 @@ def prepare_chunks(image_path: str) -> list[bytes]:
         piece.save(buf, format="PNG")
         out.append(buf.getvalue())
     return out
+
+
+def prepare_chunks(image_path: str) -> list[bytes]:
+    """이미지를 로드·리사이즈·(필요시) 분할하여 PNG bytes 리스트로 반환."""
+    return _prepare_chunks(Image.open(image_path))
+
+
+def prepare_chunks_from_bytes(raw: bytes) -> list[bytes]:
+    """업로드된 이미지 bytes(파일 저장 없이)를 리사이즈·(필요시) 분할하여 PNG bytes 리스트로 반환.
+
+    risk_detector처럼 파일시스템에 먼저 안 쓰고 요청 바디에서 바로 받은 이미지를
+    다루는 경로용 — 리사이즈/분할 로직은 prepare_chunks()와 완전히 동일하다.
+    """
+    return _prepare_chunks(Image.open(io.BytesIO(raw)).convert("RGB"))

@@ -7,11 +7,13 @@ from sentence_transformers import CrossEncoder, SentenceTransformer
 from app.core.config import get_settings
 from app.core.logging import log_event
 from app.domain.estimate_engine import EstimateEngine
+from app.domain.risk_detector_service import RiskDetectorService
 from app.repositories.case_repository import CaseRepository
 from app.repositories.coefficient_repository import CoefficientRepository
 from app.repositories.estimate_repository import EstimateRepository
 from app.repositories.feedback_repository import FeedbackRepository
 from app.repositories.pending_estimate_repository import PendingEstimateRepository
+from app.repositories.risk_report_repository import RiskReportRepository
 
 
 @asynccontextmanager
@@ -59,6 +61,10 @@ async def lifespan(app: FastAPI):
     app.state.pending_estimate_repository = PendingEstimateRepository(
         collection=mongo_client[settings.mongo_db_name]["pending_estimates"],
     )
+    app.state.risk_report_repository = RiskReportRepository(
+        collection=mongo_client[settings.mongo_db_name]["risk_reports"],
+    )
+    app.state.risk_detector_service = RiskDetectorService(engine=app.state.engine)
 
     yield
 
@@ -79,3 +85,11 @@ def get_feedback_repository(request: Request) -> FeedbackRepository:
 
 def get_pending_estimate_repository(request: Request) -> PendingEstimateRepository:
     return request.app.state.pending_estimate_repository
+
+
+def get_risk_report_repository(request: Request) -> RiskReportRepository:
+    return request.app.state.risk_report_repository
+
+
+def get_risk_detector_service(request: Request) -> RiskDetectorService:
+    return request.app.state.risk_detector_service
