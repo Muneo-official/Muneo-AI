@@ -10,6 +10,7 @@ uvicorn[standard]==0.52.3
 pydantic==2.13.4
 pydantic-settings==2.15.0
 slowapi==0.1.10
+python-multipart==0.0.32  # app/api/routers/risk_detector.py — File/Form 업로드 파싱
 
 # MongoDB (Atlas, $vectorSearch)
 motor==3.7.1
