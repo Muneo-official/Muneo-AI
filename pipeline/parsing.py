@@ -17,6 +17,16 @@ from dataclasses import asdict
 from pipeline.validators import validate_case
 
 
+def _safe_int(value, default: int = 0) -> int:
+    """tool_schema.py가 total_cost/amount를 integer로 강제해도, 모델이 가끔 스키마를
+    벗어난 값("<UNKNOWN>" 등)을 낼 수 있다 — risk_detector 실제 이미지 배치 테스트에서
+    total_cost="<UNKNOWN>"으로 int() 캐스팅이 그대로 크래시하는 걸 발견해 추가했다."""
+    try:
+        return int(value or default)
+    except (TypeError, ValueError):
+        return default
+
+
 def _parse_raw(text: str) -> dict:
     """API 응답 텍스트에서 JSON 객체 추출."""
     raw = text.strip()
@@ -64,8 +74,8 @@ def _fix_column_swap(item: dict) -> dict:
 def _chunk_dedup_key(item: dict) -> tuple:
     code = item.get("code", "")
     cat = item.get("category", "")
-    amt = int(item.get("amount") or 0)
-    unit_p = int(item.get("unit_price") or 0)
+    amt = _safe_int(item.get("amount"))
+    unit_p = _safe_int(item.get("unit_price"))
     desc_pre = item.get("description", "")[:4]
     if code:
         return (code, cat, amt, unit_p)
@@ -122,7 +132,7 @@ def _remove_category_subtotals(line_items: list[dict]) -> list[dict]:
 
 
 def _add_consistency_warning(result: dict) -> dict:
-    total = int(result.get("total_cost") or 0)
+    total = _safe_int(result.get("total_cost"))
     if total == 0:
         return result
     line_sum = sum(
@@ -140,7 +150,7 @@ def _add_consistency_warning(result: dict) -> dict:
 
 
 def _calc_consistency(r: dict) -> float:
-    total = int(r.get("total_cost") or 0)
+    total = _safe_int(r.get("total_cost"))
     if total == 0:
         return float("inf")
     line_sum = sum(
@@ -166,7 +176,7 @@ def merge_chunk_results(chunk_results: list[dict]) -> dict:
     for r in chunk_results:
         if not r.get("is_estimate"):
             continue
-        total = int(r.get("total_cost") or 0)
+        total = _safe_int(r.get("total_cost"))
         if total > max_total:
             max_total = total
         for item in r.get("line_items", []):
@@ -198,17 +208,17 @@ def merge_parsed_results(results: list[dict]) -> dict:
 
     if len(estimate_results) == 1:
         r = estimate_results[0]
-        total = int(r.get("total_cost") or 0)
+        total = _safe_int(r.get("total_cost"))
         items = [_fix_column_swap(it) for it in r.get("line_items", []) if it.get("amount")]
         items = _remove_aggregate_items(items, total)
         return _add_consistency_warning({"total_cost": total, "line_items": items})
 
-    totals = {int(r.get("total_cost") or 0) for r in estimate_results}
+    totals = {_safe_int(r.get("total_cost")) for r in estimate_results}
     totals.discard(0)
 
     if len(totals) >= 2:
         best = min(estimate_results, key=_calc_consistency)
-        best_total = int(best.get("total_cost") or 0)
+        best_total = _safe_int(best.get("total_cost"))
         items = [_fix_column_swap(it) for it in best.get("line_items", []) if it.get("amount")]
         items = _remove_aggregate_items(items, best_total)
         return _add_consistency_warning({"total_cost": best_total, "line_items": items})
@@ -217,7 +227,7 @@ def merge_parsed_results(results: list[dict]) -> dict:
     all_items = []
     max_total = 0
     for r in estimate_results:
-        total = int(r.get("total_cost") or 0)
+        total = _safe_int(r.get("total_cost"))
         if total > max_total:
             max_total = total
         for item in r.get("line_items", []):

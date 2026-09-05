@@ -80,3 +80,25 @@ def test_merge_chunk_results_uses_max_total_cost_across_chunks():
 
 def test_merge_chunk_results_no_estimate_returns_is_estimate_false():
     assert merge_chunk_results([{"is_estimate": False}]) == {"is_estimate": False}
+
+
+def test_merge_chunk_results_tolerates_non_numeric_total_cost():
+    # 실측: risk_detector 실제 이미지 배치 테스트에서 Vision API가 total_cost를
+    # 정수 대신 "<UNKNOWN>" 문자열로 반환해 int() 캐스팅이 그대로 크래시했다.
+    chunk = _result("<UNKNOWN>", [_item("도배공사", "실크벽지", 900_000)])
+    merged = merge_chunk_results([chunk])
+    assert merged["total_cost"] == 0
+    assert len(merged["line_items"]) == 1
+
+
+def test_merge_parsed_results_tolerates_non_numeric_total_cost():
+    result = _result("<UNKNOWN>", [_item("도배공사", "실크벽지", 900_000)])
+    merged = merge_parsed_results([result])
+    assert merged["total_cost"] == 0
+
+
+def test_merge_parsed_results_multi_image_tolerates_non_numeric_total_cost():
+    ok = _result(1_000_000, [_item("도배공사", "실크벽지", 950_000)])
+    unknown = _result("<UNKNOWN>", [_item("타일공사", "욕실타일", 500_000)])
+    merged = merge_parsed_results([ok, unknown])
+    assert merged["total_cost"] == 1_000_000
