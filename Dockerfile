@@ -31,10 +31,14 @@ RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTr
        fi \
     && chmod -R a+rX /opt/huggingface
 
-# scripts/도 같이 넣는다 — expire_estimates / accuracy_report / setup_indexes를
-# 컨테이너 안에서(배치잡·수동 실행) 돌릴 수 있어야 한다.
+# pipeline/은 리스크 진단 API의 런타임 의존성이고, scripts/는 expire_estimates /
+# accuracy_report / setup_indexes를 컨테이너 안에서 실행할 때 필요하다.
 COPY app ./app
+COPY pipeline ./pipeline
 COPY scripts ./scripts
+
+# 런타임에 필요한 로컬 패키지가 이미지에서 빠졌으면 배포 전에 빌드를 실패시킨다.
+RUN python -c "import app.main"
 
 RUN useradd --create-home --uid 10001 appuser && chown -R appuser:appuser /app
 USER appuser

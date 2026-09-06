@@ -29,6 +29,10 @@ WORKDIR /app
 
 COPY --from=builder /opt/venv /opt/venv
 COPY --chown=ai:ai app ./app
+COPY --chown=ai:ai pipeline ./pipeline
+
+# 런타임에 필요한 로컬 패키지가 이미지에서 빠졌으면 배포 전에 빌드를 실패시킨다.
+RUN python -c "import app.main"
 
 RUN mkdir -p /app/logs /home/ai/.cache/huggingface \
     && chown -R ai:ai /app/logs /home/ai/.cache
