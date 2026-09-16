@@ -33,6 +33,10 @@ class CaseRepository:
 
         pipeline = [
             {"$vectorSearch": vector_search_stage},
+            # is_non_residential은 Atlas 인덱스의 filter 필드가 아니라 일반 $match로 제외한다
+            # (vectorSearch의 filter 파라미터는 인덱스에 등록된 필드만 써야 안전하게 동작함 —
+            # has_* 필드 누락으로 Stage 1~4가 항상 폴백되던 과거 버그가 재발할 수 있어 피한다).
+            {"$match": {"is_non_residential": {"$ne": True}}},
             {"$project": {"embedding": 0}},
         ]
         cursor = self._collection.aggregate(pipeline)

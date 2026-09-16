@@ -944,6 +944,15 @@ class EstimateEngine:
 
         adj_mid = (adj_lo + adj_hi) // 2
 
+        def _cost_per_pyeong(c: dict) -> int:
+            # cost_per_pyeong은 ingest 시점에 미리 계산해 저장한 필드라, size_pyeong이
+            # 이후 별도로 보정된 레코드(약 709건 중 116건, 2026-09-17 확인)는 total_cost/
+            # size_pyeong이 멀쩡한데도 이 필드만 0으로 남아있었다. 저장값을 신뢰하지 않고
+            # 매번 total_cost/size_pyeong으로 다시 계산해 이 불일치를 원천 차단한다.
+            size = c.get("size_pyeong") or 0
+            total = c.get("total_cost") or 0
+            return int(total / size) if size > 0 else 0
+
         참고_사례 = sorted(
             [
                 {
@@ -951,7 +960,7 @@ class EstimateEngine:
                     "지역":   c.get("region"),
                     "평수":   c.get("size_pyeong"),
                     "총금액": int(c.get("total_cost") or 0),
-                    "평당":   int(c.get("cost_per_pyeong") or 0),
+                    "평당":   _cost_per_pyeong(c),
                 }
                 for c in cases
                 if c.get("total_cost")
