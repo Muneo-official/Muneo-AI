@@ -64,6 +64,31 @@ def build_api_params(image_bytes: bytes) -> dict:
     }
 
 
+def build_pdf_api_params(pdf_bytes: bytes) -> dict:
+    """PDF 첨부 견적서용 API 파라미터. 이미지처럼 페이지별로 쪼개 보낼 필요 없이
+    Claude가 PDF를 문서 그대로(멀티페이지 포함) 받아 한 번에 파싱한다."""
+    return {
+        "model": MODEL,
+        "max_tokens": MAX_TOKENS,
+        "tools": [ESTIMATE_TOOL],
+        "tool_choice": {"type": "tool", "name": TOOL_NAME},
+        "messages": [{
+            "role": "user",
+            "content": [
+                {
+                    "type": "document",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "application/pdf",
+                        "data": base64.standard_b64encode(pdf_bytes).decode("utf-8"),
+                    },
+                },
+                {"type": "text", "text": TOOL_USE_INSTRUCTIONS},
+            ],
+        }],
+    }
+
+
 def call_vision_api(image_bytes: bytes, client: anthropic.Anthropic | None = None) -> dict:
     """청크(또는 이미지) 하나를 파싱. tool_use 블록의 input을 그대로 반환한다."""
     client = client or get_client()
@@ -88,3 +113,28 @@ def parse_image(image_path: str, client: anthropic.Anthropic | None = None) -> d
     chunks = prepare_chunks(image_path)
     chunk_results = [call_vision_api(c, client) for c in chunks]
     return merge_chunk_results(chunk_results)
+
+
+def parse_pdf(pdf_path: str, client: anthropic.Anthropic | None = None) -> dict:
+    """PDF 첨부 견적서 1건을 파싱한다.
+
+    이미지와 달리 페이지 분할이 필요 없다 — Claude가 멀티페이지 PDF를 문서 하나로 받아
+    한 번의 tool_use 호출로 전체 표를 추출한다. 반환 형태는 call_vision_api()와 동일
+    (is_estimate/total_cost/line_items가 이미 채워진 dict)이라 merge_and_validate()에
+    그대로 넘길 수 있다.
+    """
+    client = client or get_client()
+    with open(pdf_path, "rb") as f:
+        pdf_bytes = f.read()
+    response = client.messages.create(**build_pdf_api_params(pdf_bytes))
+    for block in response.content:
+        if block.type == "tool_use":
+            return block.input
+    return {"is_estimate": False}
+
+
+def parse_document(path: str, client: anthropic.Anthropic | None = None) -> dict:
+    """확장자로 이미지/PDF를 구분해 알맞은 파서로 위임한다."""
+    if path.lower().endswith(".pdf"):
+        return parse_pdf(path, client)
+    return parse_image(path, client)

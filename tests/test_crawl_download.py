@@ -1,10 +1,11 @@
-from pipeline.crawl_download import download_images
+from pipeline.crawl_download import download_images, download_pdf_attachment
 
 
 class _FakeResponse:
-    def __init__(self, content: bytes, status: int = 200):
+    def __init__(self, content: bytes, status: int = 200, headers: dict | None = None):
         self.content = content
         self.status_code = status
+        self.headers = headers or {}
 
     def raise_for_status(self):
         if self.status_code >= 400:
@@ -88,3 +89,80 @@ def test_download_images_creates_directory(tmp_path, monkeypatch):
     assert not out_dir.exists()
     download_images(["https://x.com/a.jpg"], out_dir, "art")
     assert out_dir.exists()
+
+
+class _FakeSession:
+    def __init__(self, response: _FakeResponse):
+        self._response = response
+        self.cookies = _FakeCookieJar()
+
+    def get(self, url, headers=None, timeout=None):
+        return self._response
+
+
+class _FakeCookieJar:
+    def set(self, name, value, domain=None):
+        pass
+
+
+def test_download_pdf_attachment_saves_when_signature_matches(tmp_path, monkeypatch):
+    # Content-Type은 application/octet-stream처럼 신뢰할 수 없는 값이 흔해서, 저장 여부는
+    # 파일 시그니처(%PDF-)로만 판단해야 한다 — Content-Type을 일부러 안 맞춰서 검증한다.
+    resp = _FakeResponse(b"%PDF-1.4 fake", headers={"Content-Type": "application/octet-stream"})
+    monkeypatch.setattr(
+        "pipeline.crawl_download.requests.Session", lambda: _FakeSession(resp)
+    )
+
+    out_dir = tmp_path / "905396"
+    saved, reason = download_pdf_attachment(
+        "https://downapi.cafe.naver.com/v1.0/cafes/article/file/abc/download",
+        out_dir,
+        "905396",
+        cookies=[{"name": "NID_AUT", "value": "x", "domain": ".naver.com"}],
+    )
+
+    assert reason is None
+    assert saved is not None
+    assert saved.name == "905396.pdf"
+    assert saved.read_bytes() == b"%PDF-1.4 fake"
+
+
+def test_download_pdf_attachment_rejects_non_pdf_signature(tmp_path, monkeypatch):
+    # 로그인 세션이 없으면 다운로드 API가 HTML 로그인 페이지를 내려줄 수 있다 —
+    # 그걸 그대로 .pdf로 저장하면 안 된다.
+    resp = _FakeResponse(b"<html>login required</html>", headers={"Content-Type": "text/html"})
+    monkeypatch.setattr(
+        "pipeline.crawl_download.requests.Session", lambda: _FakeSession(resp)
+    )
+
+    saved, reason = download_pdf_attachment(
+        "https://downapi.cafe.naver.com/v1.0/cafes/article/file/abc/download",
+        tmp_path / "art",
+        "art",
+        cookies=[],
+    )
+
+    assert saved is None
+    assert reason is not None and "시그니처" in reason
+
+
+def test_download_pdf_attachment_reports_request_failure(tmp_path, monkeypatch):
+    import requests
+
+    class _FailingSession:
+        cookies = _FakeCookieJar()
+
+        def get(self, url, headers=None, timeout=None):
+            raise requests.RequestException("network error")
+
+    monkeypatch.setattr("pipeline.crawl_download.requests.Session", lambda: _FailingSession())
+
+    saved, reason = download_pdf_attachment(
+        "https://downapi.cafe.naver.com/v1.0/cafes/article/file/abc/download",
+        tmp_path / "art",
+        "art",
+        cookies=[],
+    )
+
+    assert saved is None
+    assert reason is not None and "요청 실패" in reason

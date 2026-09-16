@@ -186,16 +186,29 @@ async def cmd_collect(base_dir: str) -> None:
         print("[WARN] 아직 진행 중인 배치가 있음 — status로 먼저 확인할 것")
         return
 
-    results = collect_batch_results(anthropic_client, state["batches"], state["meta"])
+    results, failed_article_ids = collect_batch_results(
+        anthropic_client, state["batches"], state["meta"]
+    )
     client, cases_col, queue_col = _get_collections()
 
     counts = {"estimate_cases": 0, "review_queue": 0}
     failed = []
+    retry_later = []
 
     # 요청 자체가 없었던(이미지가 아예 없거나 전부 보일러플레이트였던) article은
     # results에 안 나타난다 — 실시간 모드(process_article)처럼 빈 파싱 결과로
     # review_queue에 명시적으로 보내야 조용히 유실되지 않는다.
+    #
+    # 반면 API 요청 자체가 실패한(잔액 부족 등) article은 완전히 다르게 다뤄야 한다 —
+    # "견적서가 아니었다"와 구분 못 하고 review_queue로 보내면 article_id가 이미
+    # 처리된 걸로 Mongo에 남아 다음 submit에서 영구히 스킵된다. Mongo/local json 둘 다
+    # 건드리지 않고 그대로 둬서, 다음 submit이 "아직 처리 안 됨"으로 다시 집어가게 한다.
     for article_id, article_dir in state["article_dirs"].items():
+        if article_id in failed_article_ids:
+            retry_later.append(article_id)
+            print(f"{article_id} -> [SKIP] 배치 요청 실패(잔액 부족 등) — 다음 submit에서 재시도됨")
+            continue
+
         images = results.get(article_id, {})
         try:
             per_image_results = []
@@ -217,6 +230,8 @@ async def cmd_collect(base_dir: str) -> None:
     print(f"review_queue:   {counts['review_queue']}건")
     if failed:
         print(f"실패: {len(failed)}건 -> {failed}")
+    if retry_later:
+        print(f"배치 요청 실패(재시도 필요): {len(retry_later)}건 -> Mongo에 저장 안 됨, 다음 submit에서 자동 재시도")
     print("=" * 50)
 
     _state_path(base_dir).unlink(missing_ok=True)
