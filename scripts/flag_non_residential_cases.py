@@ -18,7 +18,6 @@
 
 import argparse
 import asyncio
-import re
 
 from dotenv import load_dotenv
 from motor.motor_asyncio import AsyncIOMotorClient

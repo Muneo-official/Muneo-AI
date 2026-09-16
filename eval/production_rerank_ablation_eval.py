@@ -22,7 +22,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from sentence_transformers import CrossEncoder, SentenceTransformer
 
 from app.core.config import get_settings
-from app.domain.estimate_engine import EstimateEngine, REGION_MAP, 자재등급_TO_GRADE
+from app.domain.estimate_engine import REGION_MAP, 자재등급_TO_GRADE, EstimateEngine
 from app.repositories.case_repository import CaseRepository
 
 load_dotenv()
@@ -111,8 +111,12 @@ async def main() -> None:
 
         vl, vr, vu = precision(vector_top15, labels, qid)
         hl, hr, hu = precision(hybrid_top15, labels, qid)
-        vec_labeled += vl; vec_relevant += vr; vec_unlabeled += vu
-        hyb_labeled += hl; hyb_relevant += hr; hyb_unlabeled += hu
+        vec_labeled += vl
+        vec_relevant += vr
+        vec_unlabeled += vu
+        hyb_labeled += hl
+        hyb_relevant += hr
+        hyb_unlabeled += hu
 
         same_ids = [str(c.get("article_id")) for c in vector_top15] == [str(c.get("article_id")) for c in hybrid_top15]
         if same_ids:
