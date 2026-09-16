@@ -31,7 +31,10 @@ CASE_TEXT_REQUEST_CAP = 60  # _case_text()의 요청글 트렁케이션 길이. 
                             # cross-encoder가 텍스트 길이 자체에 편향돼 순위를 왜곡한다는 게
                             # 확인됨(eval/results/reranker_hybrid_eval.md) — 60이 벡터 단독
                             # 대비 precision@5/10 전부 개선되는 것으로 검증된 값.
-SIZE_RANGE         = 7    # 평수 ±7평 필터
+SIZE_RANGE         = 5    # 평수 ±5평 필터 — 원래 7이었으나, eval/results/reranker_hybrid_eval.md
+                           # 실패 분석에서 평수차이=7인 후보의 relevant 비율이 22.2%로 급락하는 게
+                           # 확인됨(0~6평 차이는 53~77%대 유지). 라벨링 기준(_suggested_relevant)의
+                           # 관용치도 원래 ±5였는데 production 필터만 더 넓게(±7) 잡혀있던 불일치.
 MAX_SPEC_ITEMS     = 12   # 공종별 명세 최대 항목 수 (ancillary 제외)
 SPEC_RATIO         = 0.15 # 비정규화 항목 등장 비율 threshold (전체 사례 수 × 비율)
 SCOPE_COVERAGE_MIN = 0.40 # 요청 공종 비용 합계 / 사례 총 비용 최소 비율 (전체 시공용)
@@ -53,6 +56,28 @@ _HAS_TO_WORK = {
     "has_가구": "가구", "has_욕실": "욕실", "has_바닥": "바닥",
     "has_전기": "전기", "has_조명": "조명",
 }
+
+
+def line_items_text(case: dict) -> str:
+    """request_body_text가 없는 사례를 위한 대체 텍스트 — 실제 시공 품목명으로 구성.
+
+    일부 업체 게시글은 본문에 "고객 의뢰글" 참고 링크가 아예 없어서 request_body_text를
+    가져올 데이터 자체가 없다(크롤러 버그 아님 — 업체 템플릿 차이). 이 경우 _case_text()/
+    scripts.backfill_new_embeddings.build_document()가 "{평수}평 {지역} {공종} 리모델링"
+    같은 헤더만 임베딩하게 되는데, 이런 케이스가 실측 851건 추가 후 재검증에서 24개 쿼리 중
+    최대 21개의 벡터 top-20에 무차별하게 걸려 precision을 크게 깎아먹는 게 확인됐다
+    (eval/results/reranker_hybrid_eval.md). line_items는 모든 estimate_cases 문서에 항상
+    있고 실제로 뭘 시공했는지 구체적으로 담고 있어 이 대체재로 적합하다.
+    """
+    line_items = (case.get("parsed_estimate") or {}).get("line_items", [])
+    seen: set[str] = set()
+    parts: list[str] = []
+    for item in line_items:
+        desc = (item.get("description") or "").strip()
+        if desc and desc not in seen:
+            seen.add(desc)
+            parts.append(desc)
+    return " ".join(parts)
 
 # 사용자 지역 → DB region 매핑
 REGION_MAP = {
@@ -570,7 +595,7 @@ class EstimateEngine:
         size = case.get("size_pyeong", "?")
         region = case.get("region", "")
         works = [name for key, name in _HAS_TO_WORK.items() if case.get(key) == "true"]
-        request_text = (case.get("request_body_text") or "").strip()
+        request_text = (case.get("request_body_text") or "").strip() or line_items_text(case)
         header = " ".join(filter(None, [f"{size}평", region, " ".join(works), "리모델링"]))
         if request_text:
             return f"{header}\n{request_text[:CASE_TEXT_REQUEST_CAP]}"
