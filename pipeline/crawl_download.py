@@ -60,3 +60,40 @@ def download_images(image_urls: list[str], article_dir: Path, folder_name: str) 
         saved.append(out_path)
 
     return saved
+
+
+def download_pdf_attachment(
+    url: str, article_dir: Path, folder_name: str, cookies: list[dict]
+) -> Path | None:
+    """PDF 첨부 견적서 하나를 다운로드한다.
+
+    다운로드 API(downapi.cafe.naver.com)는 카페 로그인 세션이 필요해서, 셀레니움
+    드라이버의 쿠키(driver.get_cookies())를 그대로 requests 세션에 실어 보낸다.
+
+    Content-Type 헤더는 신뢰하지 않는다 — 파일 다운로드 API는 실제 파일 종류와 무관하게
+    application/octet-stream으로 내려주는 경우가 흔해서, 대신 파일 시그니처(%PDF-로
+    시작하는지)로 진짜 PDF인지 확인한다. 실패하면 이유(HTTP 상태/시그니처 불일치)를
+    호출자가 로그로 남길 수 있게 사유 문자열도 같이 반환한다.
+    """
+    session = requests.Session()
+    for c in cookies:
+        session.cookies.set(c["name"], c["value"], domain=c.get("domain"))
+
+    try:
+        resp = session.get(url, headers=HEADERS, timeout=15)
+        resp.raise_for_status()
+    except requests.RequestException as e:
+        return None, f"요청 실패: {e}"
+
+    if not resp.content.startswith(b"%PDF-"):
+        preview = resp.content[:80]
+        return None, (
+            f"PDF 시그니처 불일치 (status={resp.status_code}, "
+            f"content-type={resp.headers.get('Content-Type')}, preview={preview!r})"
+        )
+
+    article_dir = Path(article_dir)
+    article_dir.mkdir(parents=True, exist_ok=True)
+    out_path = article_dir / f"{folder_name}.pdf"
+    out_path.write_bytes(resp.content)
+    return out_path, None
