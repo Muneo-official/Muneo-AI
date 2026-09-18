@@ -17,7 +17,7 @@ import anthropic
 
 from pipeline.crawl_filter import is_boilerplate
 from pipeline.image_prep import prepare_chunks
-from pipeline.vision_client import build_api_params
+from pipeline.vision_client import build_api_params, build_pdf_api_params
 
 BATCH_CHUNK_SIZE = 150  # 배치 하나당 최대 요청 수 (Anthropic 요청 크기 제한 대응)
 
@@ -46,6 +46,17 @@ def build_batch_requests(
 
     for article_id, image_paths in articles:
         for img_idx, path in enumerate(image_paths):
+            if path.lower().endswith(".pdf"):
+                # PDF는 페이지 분할이 필요 없다 — 문서 하나 = 청크 하나로 취급해서
+                # collect_batch_results()의 (article_id, image_index, chunk_index) 복원
+                # 로직을 그대로 재사용한다.
+                with open(path, "rb") as f:
+                    pdf_bytes = f.read()
+                custom_id = f"{article_id}__{img_idx}__0"
+                requests.append({"custom_id": custom_id, "params": build_pdf_api_params(pdf_bytes)})
+                meta[custom_id] = RequestMeta(article_id, img_idx, 0)
+                continue
+
             if is_boilerplate(path):
                 continue
             for chunk_idx, chunk_bytes in enumerate(prepare_chunks(path)):
@@ -98,21 +109,30 @@ def check_batches_status(client: anthropic.Anthropic, batches: list[dict]) -> di
 
 def collect_batch_results(
     client: anthropic.Anthropic, batches: list[dict], meta: dict[str, RequestMeta]
-) -> dict[str, dict[int, dict[int, dict]]]:
-    """article_id -> image_index -> chunk_index -> tool_use input(dict).
+) -> tuple[dict[str, dict[int, dict[int, dict]]], set[str]]:
+    """(article_id -> image_index -> chunk_index -> tool_use input(dict), 실패한 article_id 집합).
 
     all_ended가 True일 때만 호출할 것 — 진행 중인 배치는 결과가 비어있을 수 있다.
     이 결과를 pipeline.parsing.merge_chunk_results()(같은 이미지의 청크들)로 합친 뒤,
     이미지별 결과를 다시 merge_parsed_results()(같은 사례의 여러 페이지)로 합치면 된다.
+
+    요청이 실패(errored)한 article_id는 별도로 반환한다 — 잔액 부족 등 API 레벨 실패를
+    "견적서가 아니었다"(파싱 결과 없음)와 구분하지 못하면, 호출자가 review_queue로
+    잘못 보내버려서 나중에 재시도할 길이 막힌다(article_id가 이미 저장된 걸로 처리돼
+    다음 실행에서 스킵 대상이 됨).
     """
     out: dict[str, dict[int, dict[int, dict]]] = defaultdict(lambda: defaultdict(dict))
+    failed_article_ids: set[str] = set()
     for b in batches:
         for result in client.messages.batches.results(b["batch_id"]):
             m = meta.get(result.custom_id)
-            if m is None or result.result.type != "succeeded":
+            if m is None:
+                continue
+            if result.result.type != "succeeded":
+                failed_article_ids.add(m.article_id)
                 continue
             for block in result.result.message.content:
                 if block.type == "tool_use":
                     out[m.article_id][m.image_index][m.chunk_index] = block.input
                     break
-    return out
+    return out, failed_article_ids

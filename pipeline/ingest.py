@@ -19,7 +19,7 @@ from motor.motor_asyncio import AsyncIOMotorCollection
 from pipeline.aggregation import build_category_costs, build_has_flags
 from pipeline.parsing import merge_and_validate
 from pipeline.routing import route_case
-from pipeline.vision_client import parse_image
+from pipeline.vision_client import parse_document
 
 
 def load_article_record(article_dir: str) -> dict:
@@ -69,7 +69,7 @@ def process_article(article_dir: str) -> dict:
     """
     record = load_article_record(article_dir)
     image_paths = record.get("local_images") or []
-    per_image_results = [parse_image(p) for p in image_paths]
+    per_image_results = [parse_document(p) for p in image_paths]
     return finalize_record(record, per_image_results)
 
 

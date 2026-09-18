@@ -44,6 +44,20 @@ def test_build_batch_requests_multiple_articles_and_images(tmp_path: pathlib.Pat
     assert meta["111__1__0"].image_index == 1
 
 
+def test_build_batch_requests_pdf_single_request_no_chunking(tmp_path: pathlib.Path):
+    pdf_path = tmp_path / "estimate.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4 fake pdf bytes")
+
+    requests, meta = build_batch_requests([("123", [str(pdf_path)])])
+
+    assert len(requests) == 1
+    assert requests[0]["custom_id"] == "123__0__0"
+    assert meta["123__0__0"] == RequestMeta("123", 0, 0)
+    params = requests[0]["params"]
+    assert params["messages"][0]["content"][0]["type"] == "document"
+    assert params["messages"][0]["content"][0]["source"]["media_type"] == "application/pdf"
+
+
 def test_build_batch_requests_params_use_tool_use(tmp_path: pathlib.Path):
     # 실시간 경로(pipeline/vision_client.py)와 동일한 build_api_params를 재사용해야
     # 배치도 category enum 강제가 똑같이 적용된다.

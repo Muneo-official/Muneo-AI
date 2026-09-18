@@ -30,7 +30,7 @@ def test_process_article_fills_derived_fields(tmp_path: pathlib.Path, monkeypatc
     )
     monkeypatch.setattr(
         ingest_module,
-        "parse_image",
+        "parse_document",
         lambda path: {
             "is_estimate": True,
             "total_cost": 1_000_000,
@@ -52,7 +52,7 @@ def test_process_article_no_estimate_images_returns_empty_parsed_estimate(
     tmp_path: pathlib.Path, monkeypatch
 ):
     article_dir = _write_article(tmp_path, "456", local_images=["logo.png"])
-    monkeypatch.setattr(ingest_module, "parse_image", lambda path: {"is_estimate": False})
+    monkeypatch.setattr(ingest_module, "parse_document", lambda path: {"is_estimate": False})
 
     record = process_article(article_dir)
 
@@ -75,7 +75,7 @@ async def test_ingest_article_routes_high_confidence_to_estimate_cases(
     article_dir = _write_article(tmp_path, "789", local_images=["a.png"])
     monkeypatch.setattr(
         ingest_module,
-        "parse_image",
+        "parse_document",
         lambda path: {
             "is_estimate": True,
             "total_cost": 500_000,
@@ -96,7 +96,7 @@ async def test_ingest_article_routes_no_estimate_to_review_queue(
     tmp_path: pathlib.Path, monkeypatch
 ):
     article_dir = _write_article(tmp_path, "999", local_images=["logo.png"])
-    monkeypatch.setattr(ingest_module, "parse_image", lambda path: {"is_estimate": False})
+    monkeypatch.setattr(ingest_module, "parse_document", lambda path: {"is_estimate": False})
     cases_col, queue_col = _FakeCollection(), _FakeCollection()
 
     destination = await ingest_article(article_dir, cases_col, queue_col)
@@ -117,7 +117,7 @@ async def test_ingest_article_routes_low_confidence_to_review_queue(
     article_dir = _write_article(tmp_path, "111", size_pyeong=877930, local_images=["a.png"])
     monkeypatch.setattr(
         ingest_module,
-        "parse_image",
+        "parse_document",
         lambda path: {
             "is_estimate": True,
             "total_cost": 500_000,
