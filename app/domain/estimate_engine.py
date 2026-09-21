@@ -375,7 +375,11 @@ def _margin_scale(n_cases: int) -> tuple[float, float]:
     "거실": 0.35,
     "침실": 0.40,
     "주방": 0.10,
+    "현관": 0.05,  # 근거 데이터 없음 — 현관 면적 추정값
 }
+# 벽면만 도배(천장 제외)할 때 곱하는 계수. 벽 ≈ 바닥면적×2.5~3, 천장 ≈ 바닥면적×1 이라는 기하 추정값
+# (근거 데이터 없음, calibration 필요)
+도배_벽면_계수 = 0.75
 방별_침실_비율: dict[int, float] = {1: 0.13, 2: 0.27, 3: 0.40, 4: 0.53}
 방_마루_비율: dict[int, float] = {1: 0.70, 2: 0.85, 3: 1.00, 4: 1.15}
 
@@ -802,13 +806,26 @@ class EstimateEngine:
             범위_raw = 도배_inp.get("범위", "전체")
             범위_list = 범위_raw if isinstance(범위_raw, list) else [범위_raw]
 
-            if "전체" not in 범위_list:
+            벽면만 = "벽면" in 범위_list
+            방들 = [r for r in 범위_list if r != "벽면"]
+            # 프론트는 침실을 "침실1"~"침실N"으로 개별 선택하므로 개수로 환산한다
+            침실_수 = sum(1 for r in 방들 if r.startswith("침실") and r[2:].isdigit())
+
+            if "전체" in 방들 or (벽면만 and not 방들):
+                ratio = 1.0
+            else:
                 ratio = 0.0
-                for r in 범위_list:
-                    if r == "침실":
-                        ratio += 방별_침실_비율.get(방개수, 0.40)
-                    else:
+                침실_전체 = 방별_침실_비율.get(방개수, 0.40)
+                if "침실" in 방들:
+                    ratio += 침실_전체
+                elif 침실_수:
+                    ratio += min(침실_수 * 침실_전체 / 방개수, 침실_전체)
+                for r in 방들:
+                    if not r.startswith("침실"):
                         ratio += 도배_범위_비율.get(r, 0.0)
+            if 벽면만:
+                ratio *= 도배_벽면_계수
+            if ratio != 1.0:
                 ratio = max(0.05, min(ratio, 1.0))
                 f *= ratio
                 notes.append(f"도배 범위 {'·'.join(범위_list)} (면적 {ratio:.0%})")
