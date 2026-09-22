@@ -1,7 +1,7 @@
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, BeforeValidator, Field
 
 공종_리터럴 = Literal[
     "도배", "장판", "마루", "주방", "욕실", "전기/조명",
@@ -9,7 +9,26 @@ from pydantic import BaseModel, Field
 ]
 
 
-도배_범위_리터럴 = Literal["전체", "거실", "침실", "주방"]
+def _공백_제거(v):
+    # 프론트가 "1개월 이내"처럼 공백 포함해 보내도 허용
+    return v.replace(" ", "") if isinstance(v, str) else v
+
+
+def _건물연식_정규화(v):
+    # 프론트 표기 "10~20년 이하" → "10~20년"
+    v = _공백_제거(v)
+    return "10~20년" if v == "10~20년이하" else v
+
+
+def _트럭접근_정규화(v):
+    # 프론트 표기 "불가(골목/지하)" → "불가(골목·지하)"
+    return v.replace("/", "·") if isinstance(v, str) else v
+
+
+도배_범위_리터럴 = Literal[
+    "전체", "거실", "침실", "주방",
+    "침실1", "침실2", "침실3", "침실4", "현관", "벽면",
+]
 
 
 class 도배옵션(BaseModel):
@@ -49,14 +68,23 @@ class EstimateRequest(BaseModel):
     방개수: int = 3
     지역: Literal["서울", "수도권", "지방"] = "서울"
 
-    건물연식: Literal["신축(3년이하)", "10년이하", "10~20년", "20년이상"] = "10~20년"
+    건물연식: Annotated[
+        Literal["신축(3년이하)", "10년이하", "10~20년", "20년이상"],
+        BeforeValidator(_건물연식_정규화),
+    ] = "10~20년"
     자재등급: Literal["일반", "중급", "고급"] = "중급"
     철거여부: Literal["있음", "없음", "모름"] = "모름"
     층수: int = 1
     엘리베이터: Literal["있음", "없음"] = "있음"
-    트럭접근: Literal["가능", "불가(골목·지하)", "모름"] = "가능"
+    트럭접근: Annotated[
+        Literal["가능", "불가(골목·지하)", "모름"],
+        BeforeValidator(_트럭접근_정규화),
+    ] = "가능"
     거주중공사: Literal["거주중", "공실"] = "공실"
-    공사시기: Literal["1개월이내", "1~3개월", "3개월이후", "미정"] = "미정"
+    공사시기: Annotated[
+        Literal["1개월이내", "1~3개월", "3개월이후", "미정"],
+        BeforeValidator(_공백_제거),
+    ] = "미정"
 
     도배: 도배옵션 | None = None
     마루: 마루옵션 | None = None
