@@ -6,10 +6,12 @@
 그 위에 코퍼스 기반 가격 이상 탐지(risk_price_checker)를 추가한다.
 """
 
+import time
 from typing import Any
 
 from starlette.concurrency import run_in_threadpool
 
+from app.core.logging import log_event
 from app.domain.estimate_engine import EstimateEngine
 from app.domain.risk_analyzer import RiskAnalyzer
 from app.domain.risk_constants import SUPPORTED_SPACE_TYPES
@@ -19,7 +21,7 @@ from app.domain.risk_price_checker import check_price_anomalies
 from app.schemas.risk import AnalyzeRiskCommand
 from pipeline.image_prep import prepare_chunks_from_bytes
 from pipeline.parsing import merge_chunk_results
-from pipeline.vision_client import call_vision_api, get_client
+from pipeline.vision_client import VisionCallResult, call_vision_api_with_usage, get_client
 
 CONTEXT_CARRYING_KEYWORDS = [
     "양중",
@@ -42,14 +44,20 @@ class RiskDetectorService:
 
     async def analyze(self, command: AnalyzeRiskCommand) -> dict[str, Any]:
         self._validate_input(command)
+        started = time.perf_counter()
 
-        all_items = await self._parse_images(command.image_files)
+        all_items, vision_calls = await self._parse_images(command.image_files)
+        parsed_at = time.perf_counter()
+        rule_analyze_s = price_check_s = 0.0
 
         if all_items:
             issues, detected_processes = self.analyzer.analyze(all_items)
             self._add_contextual_issues(command, all_items, issues, detected_processes)
+            rule_done_at = time.perf_counter()
+            rule_analyze_s = rule_done_at - parsed_at
 
             price_issues = await check_price_anomalies(command, all_items, self._engine)
+            price_check_s = time.perf_counter() - rule_done_at
             issues.extend(price_issues)
             for issue in price_issues:
                 if issue.process not in detected_processes:
@@ -66,7 +74,7 @@ class RiskDetectorService:
             ]
             detected_processes = ["견적서"]
 
-        return self.formatter.build(
+        result = self.formatter.build(
             company_name=command.company_name,
             space_type=command.space_type,
             pyeong=command.pyeong,
@@ -80,17 +88,51 @@ class RiskDetectorService:
             requested_processes=detected_processes,
         )
 
-    async def _parse_images(self, image_files: list[bytes]) -> list[dict[str, Any]]:
+        # 응답시간·비용 베이스라인 계측 (docs/RISK_DETECTOR_PERF_COST_LOG.md)
+        log_event(
+            "risk_analyze_timing",
+            image_count=len(command.image_files),
+            chunk_count=len(vision_calls),
+            line_item_count=len(all_items),
+            parse_images_s=round(parsed_at - started, 3),
+            vision_latency_sum_s=round(sum(c.latency_s for c in vision_calls), 3),
+            rule_analyze_s=round(rule_analyze_s, 3),
+            price_check_s=round(price_check_s, 3),
+            total_s=round(time.perf_counter() - started, 3),
+            input_tokens=sum(c.input_tokens for c in vision_calls),
+            output_tokens=sum(c.output_tokens for c in vision_calls),
+            cache_creation_input_tokens=sum(c.cache_creation_input_tokens for c in vision_calls),
+            cache_read_input_tokens=sum(c.cache_read_input_tokens for c in vision_calls),
+        )
+        return result
+
+    async def _parse_images(
+        self, image_files: list[bytes]
+    ) -> tuple[list[dict[str, Any]], list[VisionCallResult]]:
         client = get_client()
         all_items: list[dict[str, Any]] = []
-        for raw in image_files:
+        vision_calls: list[VisionCallResult] = []
+        for image_index, raw in enumerate(image_files):
             chunks = prepare_chunks_from_bytes(raw)
-            chunk_results = [
-                await run_in_threadpool(call_vision_api, chunk, client) for chunk in chunks
-            ]
+            chunk_results = []
+            for chunk_index, chunk in enumerate(chunks):
+                call = await run_in_threadpool(call_vision_api_with_usage, chunk, client)
+                log_event(
+                    "risk_vision_call",
+                    image_index=image_index,
+                    chunk_index=chunk_index,
+                    chunk_count=len(chunks),
+                    latency_s=round(call.latency_s, 3),
+                    input_tokens=call.input_tokens,
+                    output_tokens=call.output_tokens,
+                    cache_creation_input_tokens=call.cache_creation_input_tokens,
+                    cache_read_input_tokens=call.cache_read_input_tokens,
+                )
+                vision_calls.append(call)
+                chunk_results.append(call.result)
             merged = merge_chunk_results(chunk_results)
             all_items.extend(self._merge_across_images(all_items, merged.get("line_items", [])))
-        return all_items
+        return all_items, vision_calls
 
     def _merge_across_images(
         self, already_collected: list[dict[str, Any]], new_items: list[dict[str, Any]]

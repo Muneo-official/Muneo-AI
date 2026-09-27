@@ -10,6 +10,8 @@ Anthropic API를 실제로 호출하는 모듈이라 API 키 없이는 단위테
 
 import base64
 import os
+import time
+from dataclasses import dataclass
 
 import anthropic
 
@@ -89,14 +91,52 @@ def build_pdf_api_params(pdf_bytes: bytes) -> dict:
     }
 
 
-def call_vision_api(image_bytes: bytes, client: anthropic.Anthropic | None = None) -> dict:
-    """청크(또는 이미지) 하나를 파싱. tool_use 블록의 input을 그대로 반환한다."""
+@dataclass
+class VisionCallResult:
+    """Vision 호출 1회의 파싱 결과 + 소요시간·토큰 사용량.
+
+    실시간 경로(risk_detector)의 응답시간·비용을 계측하려고 분리했다
+    (docs/RISK_DETECTOR_PERF_COST_LOG.md). 로깅은 호출자가 한다 — pipeline이
+    app.core.logging에 의존하지 않도록.
+    """
+
+    result: dict
+    latency_s: float
+    input_tokens: int
+    output_tokens: int
+    cache_creation_input_tokens: int
+    cache_read_input_tokens: int
+
+
+def call_vision_api_with_usage(
+    image_bytes: bytes, client: anthropic.Anthropic | None = None
+) -> VisionCallResult:
+    """call_vision_api()와 같은 파싱을 하되, 소요시간과 response.usage를 같이 반환한다."""
     client = client or get_client()
+    started = time.perf_counter()
     response = client.messages.create(**build_api_params(image_bytes))
+    latency_s = time.perf_counter() - started
+
+    result = {"is_estimate": False}
     for block in response.content:
         if block.type == "tool_use":
-            return block.input
-    return {"is_estimate": False}
+            result = block.input
+            break
+
+    usage = response.usage
+    return VisionCallResult(
+        result=result,
+        latency_s=latency_s,
+        input_tokens=usage.input_tokens,
+        output_tokens=usage.output_tokens,
+        cache_creation_input_tokens=getattr(usage, "cache_creation_input_tokens", None) or 0,
+        cache_read_input_tokens=getattr(usage, "cache_read_input_tokens", None) or 0,
+    )
+
+
+def call_vision_api(image_bytes: bytes, client: anthropic.Anthropic | None = None) -> dict:
+    """청크(또는 이미지) 하나를 파싱. tool_use 블록의 input을 그대로 반환한다."""
+    return call_vision_api_with_usage(image_bytes, client).result
 
 
 def parse_image(image_path: str, client: anthropic.Anthropic | None = None) -> dict:
