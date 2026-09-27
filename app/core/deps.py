@@ -64,7 +64,11 @@ async def lifespan(app: FastAPI):
     app.state.risk_report_repository = RiskReportRepository(
         collection=mongo_client[settings.mongo_db_name]["risk_reports"],
     )
-    app.state.risk_detector_service = RiskDetectorService(engine=app.state.engine)
+    app.state.risk_detector_service = RiskDetectorService(
+        engine=app.state.engine,
+        vision_max_concurrency=settings.risk_vision_max_concurrency,
+        vision_max_concurrency_per_request=settings.risk_vision_max_concurrency_per_request,
+    )
 
     yield
 

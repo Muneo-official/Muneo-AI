@@ -4,10 +4,10 @@ scripts/bench/server.py — 벤치마크 전용 서버 실행 (운영 코드에 
 기본 모드(real): 운영과 같은 앱을 rate limit만 끈 채 띄운다. 단건 측정(bench_latency)이
 5/min 제한에 걸려 429가 섞이는 걸 막기 위해서다. Vision API는 실제로 호출된다(비용 발생).
 
-mock 모드(--mock-vision): Vision 호출만 가짜로 바꾼다. 실측 결과 파일의 호출별 지연시간 중
-하나를 무작위로 골라 그만큼 sleep한 뒤 고정 파싱 결과를 돌려준다 — 실제 API가 느린 모양은
+mock 모드(--mock-vision): Anthropic 클라이언트만 가짜로 바꾼다. 실측 결과 파일의 호출별 지연시간 중
+하나를 무작위로 골라 그만큼 기다린 뒤 고정 파싱 결과를 돌려준다 — 실제 API가 느린 모양은
 그대로 재현하되 비용 0, Anthropic rate limit 영향 0. 이미지 전처리·룰 분석·Mongo 검색·
-리랭킹은 실제 코드를 그대로 탄다. 동시 부하 테스트(bench_load)는 이 모드에서만 돌린다.
+리랭킹은 실제 코드를 그대로 탄다. 동시 부하 테스트(k6, load_test.js)는 이 모드에서만 돌린다.
 
 사용법:
   python -m scripts.bench.server                                   # real
@@ -16,17 +16,20 @@ mock 모드(--mock-vision): Vision 호출만 가짜로 바꾼다. 실측 결과 
 """
 
 import argparse
+import asyncio
 import json
+import os
 import pathlib
 import random
 import time
+from types import SimpleNamespace
 
 import uvicorn
 
-import app.domain.risk_detector_service as service_module
 from app.core.rate_limit import limiter
 from app.main import app
-from pipeline.vision_client import MODEL, VisionCallResult
+from pipeline import vision_client
+from pipeline.vision_client import MODEL
 
 # 30평대 전체 리모델링 견적서에서 흔히 나오는 공종 구성 — 룰 분석·가격 체크가 실제처럼 돌도록
 _MOCK_PARSE_RESULT = {
@@ -61,23 +64,33 @@ def _latencies_from_results(path: pathlib.Path) -> list[float]:
     return latencies
 
 
+def _fake_response() -> SimpleNamespace:
+    return SimpleNamespace(
+        content=[SimpleNamespace(type="tool_use", input=_MOCK_PARSE_RESULT)],
+        usage=SimpleNamespace(input_tokens=0, output_tokens=0, cache_creation_input_tokens=0, cache_read_input_tokens=0),
+    )
+
+
 def _install_mock(latencies: list[float], seed: int) -> None:
+    """Anthropic 클라이언트 자체를 가짜로 바꾼다 — 서비스가 어느 호출 함수를 쓰든 실제 API에 닿지 않게.
+
+    (처음엔 서비스 모듈의 호출 함수를 바꿔치기했는데, 서비스가 다른 함수를 쓰도록 바뀌면 mock이
+    조용히 빠지고 실제 API가 호출된다 — 병렬화하며 동기→비동기 호출로 바꿀 때 실제로 그럴 뻔했다.)
+    """
     rng = random.Random(seed)
 
-    def mock_call(image_bytes: bytes, client=None) -> VisionCallResult:
-        latency = rng.choice(latencies)
-        time.sleep(latency)  # 실제 동기 클라이언트처럼 스레드를 붙잡는다 (threadpool 포화 재현)
-        return VisionCallResult(
-            result=_MOCK_PARSE_RESULT,
-            latency_s=latency,
-            input_tokens=0,
-            output_tokens=0,
-            cache_creation_input_tokens=0,
-            cache_read_input_tokens=0,
-        )
+    async def async_create(**params):
+        await asyncio.sleep(rng.choice(latencies))  # 비동기 클라이언트처럼 스레드를 점유하지 않고 기다린다
+        return _fake_response()
 
-    service_module.call_vision_api_with_usage = mock_call
-    service_module.get_client = lambda: None
+    def sync_create(**params):
+        time.sleep(rng.choice(latencies))
+        return _fake_response()
+
+    vision_client._async_client = SimpleNamespace(messages=SimpleNamespace(create=async_create))
+    vision_client._client = SimpleNamespace(messages=SimpleNamespace(create=sync_create))
+    # 이중 안전장치: 혹시 실제 클라이언트가 새로 만들어져도 인증 실패로 끝나고 과금되지 않게
+    os.environ["ANTHROPIC_API_KEY"] = "bench-mock-mode-no-real-calls"
 
 
 def main() -> None:

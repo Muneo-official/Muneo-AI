@@ -1,6 +1,8 @@
 from types import SimpleNamespace
 
-from pipeline.vision_client import call_vision_api, call_vision_api_with_usage
+import pytest
+
+from pipeline.vision_client import acall_vision_api_with_usage, call_vision_api, call_vision_api_with_usage
 
 
 def _fake_client(content, usage):
@@ -48,3 +50,20 @@ def test_call_vision_api_keeps_returning_plain_result():
     client = _fake_client([SimpleNamespace(type="text", text="no tool")], _usage())
 
     assert call_vision_api(b"img", client) == {"is_estimate": False}
+
+
+@pytest.mark.asyncio
+async def test_async_version_returns_same_shape():
+    tool_input = {"is_estimate": True, "line_items": []}
+    response = SimpleNamespace(content=[SimpleNamespace(type="tool_use", input=tool_input)], usage=_usage())
+
+    async def create(**params):
+        assert params["tool_choice"] == {"type": "tool", "name": "record_estimate"}  # 동기 버전과 같은 파라미터
+        return response
+
+    client = SimpleNamespace(messages=SimpleNamespace(create=create))
+
+    call = await acall_vision_api_with_usage(b"img", client)
+
+    assert call.result == tool_input
+    assert (call.input_tokens, call.output_tokens) == (1500, 300)
