@@ -143,6 +143,9 @@ class RiskDetectorService:
             # (gather는 첫 예외만 올리고 나머지 태스크는 그대로 돌려둔다)
             for task in tasks:
                 task.cancel()
+            # cancel()은 취소를 예약만 할 뿐 실제로 끝나길 기다리지 않는다. 여기서 마저 기다려
+            # asyncio가 "Task exception was never retrieved" 경고를 내지 않도록 결과를 모두 수거한다.
+            await asyncio.gather(*tasks, return_exceptions=True)
             raise
 
         # 완료 순서와 무관하게 (이미지, 청크) 순서로 다시 모아 기존 병합 로직에 넘긴다
