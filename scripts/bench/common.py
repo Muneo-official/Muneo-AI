@@ -78,29 +78,39 @@ def log_size(log_file: pathlib.Path) -> int:
     return log_file.stat().st_size if log_file.exists() else 0
 
 
-def read_events(log_file: pathlib.Path, request_ids: set[str], offset: int = 0) -> dict[str, list[dict]]:
-    """offset(벤치 시작 시점의 파일 크기)부터 읽어 request_id별 이벤트를 모은다.
+def _iter_events(log_file: pathlib.Path, offset: int):
+    """offset(측정 시작 시점의 파일 크기)부터 JSON 로그를 한 줄씩 읽는다.
 
     로그가 회전돼 파일이 offset보다 작아졌으면 처음부터 읽는다.
     """
-    by_request: dict[str, list[dict]] = {rid: [] for rid in request_ids}
     if not log_file.exists():
-        return by_request
+        return
     with log_file.open("rb") as f:
         if log_size(log_file) >= offset:
             f.seek(offset)
         for raw in f:
             try:
-                event = json.loads(raw.decode("utf-8"))
+                yield json.loads(raw.decode("utf-8"))
             except (UnicodeDecodeError, json.JSONDecodeError):
                 continue
-            rid = event.get("request_id")
-            if rid in by_request:
-                by_request[rid].append(event)
+
+
+def read_events(log_file: pathlib.Path, request_ids: set[str], offset: int = 0) -> dict[str, list[dict]]:
+    """offset 이후 로그에서 주어진 request_id들의 이벤트를 요청별로 모은다."""
+    by_request: dict[str, list[dict]] = {rid: [] for rid in request_ids}
+    for event in _iter_events(log_file, offset):
+        rid = event.get("request_id")
+        if rid in by_request:
+            by_request[rid].append(event)
     return by_request
 
 
-def _ts(event: dict) -> float:
+def read_events_named(log_file: pathlib.Path, event_name: str, offset: int = 0) -> list[dict]:
+    """offset 이후 로그에서 특정 이벤트를 전부 모은다 (request_id를 모르는 k6 부하 측정용)."""
+    return [e for e in _iter_events(log_file, offset) if e.get("event") == event_name]
+
+
+def event_ts(event: dict) -> float:
     return datetime.fromisoformat(event["timestamp"]).timestamp()
 
 
@@ -115,17 +125,18 @@ def build_server_record(events: list[dict]) -> dict | None:
     if timing is None or http is None:
         return None
 
-    request_start = _ts(http) - http["duration_ms"] / 1000
+    request_start = event_ts(http) - http["duration_ms"] / 1000
     calls = []
     for e in events:
         if e["event"] != VISION_CALL_EVENT:
             continue
-        start = _ts(e) - e["latency_s"] - request_start
+        start = event_ts(e) - e["latency_s"] - request_start
         calls.append({
             "image_index": e["image_index"],
             "chunk_index": e["chunk_index"],
             "start_s": round(max(start, 0.0), 3),
             "latency_s": e["latency_s"],
+            "slot_wait_s": e.get("slot_wait_s", 0.0),
             "input_tokens": e["input_tokens"],
             "output_tokens": e["output_tokens"],
             "cache_creation_input_tokens": e.get("cache_creation_input_tokens", 0),

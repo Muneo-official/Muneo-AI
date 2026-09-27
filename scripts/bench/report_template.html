@@ -62,7 +62,8 @@ select, button {
 .chart text.lbl { fill: var(--ink-2); }
 .chart .mark { cursor: default; outline: none; }
 .chart .mark:hover, .chart .mark:focus { opacity: 0.8; }
-.multiples { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+.multiples { display: grid; gap: 16px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+@media (max-width: 640px) { .multiples { grid-template-columns: 1fr; } }
 .multiples h3 { font-size: 13px; margin: 0 0 4px; color: var(--ink-2); font-weight: 600; }
 .table-wrap { overflow-x: auto; }
 table { border-collapse: collapse; width: 100%; font-size: 12px; font-variant-numeric: tabular-nums; }
@@ -115,8 +116,8 @@ details summary { cursor: pointer; color: var(--ink-2); margin-top: 8px; }
     <div id="legend-load" class="legend"></div>
     <div id="load" class="multiples chart"></div>
     <div id="load-table" class="table-wrap"></div></section>
-  <section class="card"><h2>정확도 스냅샷</h2>
-    <p class="muted">개선 후에도 결과가 같아야 한다. 첫 번째 측정과 이슈 목록·정상 항목 수가 같으면 ✓.</p>
+  <section class="card"><h2>정확도 비교</h2>
+    <p class="muted">같은 입력이어도 모델 출력이 실행마다 조금씩 달라서, 첫 번째 측정의 실행 간 변동 범위를 기준으로 본다. 개선 후 실행들의 중앙값이 그 범위 안이면 ✓. 범위 밖이면 원인을 따로 확인한다.</p>
     <div id="accuracy" class="table-wrap"></div></section>
   <section class="card"><h2>원시 데이터</h2>
     <details><summary>모든 요청 보기</summary><div id="raw" class="table-wrap"></div></details></section>
@@ -235,8 +236,8 @@ function renderMeta() {
   const tb = h("tbody", null, t);
   for (const r of [...LAT, ...LOAD]) {
     const tr = h("tr", null, tb);
-    const vision = r.kind === "latency" ? r.model : `mock (${r.server_info.latency_source})`;
-    const note = r.kind === "latency" ? `케이스 ${r.cases.length}개 × ${r.runs}회 · 단가 기준일 ${r.pricing_checked_at}` : `케이스 ${r.case.id} 고정`;
+    const vision = r.kind === "latency" ? r.model : `${r.tool ? r.tool.split(" ")[0] + " · " : ""}mock (${r.server_info.latency_source})`;
+    const note = r.kind === "latency" ? `케이스 ${r.cases.length}개 × ${r.runs}회 · 단가 기준일 ${r.pricing_checked_at}` : `케이스 ${r.case.id} 고정 · ${r.model || "closed"} 모델`;
     for (const v of [r.label, r.kind === "latency" ? "단건 (실제 API)" : "부하", r.started_at, r.git_commit, vision, note]) h("td", v, tr, "l");
   }
 }
@@ -347,7 +348,7 @@ function renderScatter(width) {
   const sx = (v) => left + (v / maxX) * (width - left - right), sy = (v) => H - bottom - (v / maxY) * (H - top - bottom);
   for (const t of ticks(maxY)) {
     el("line", { x1: left, x2: width - right, y1: sy(t), y2: sy(t), stroke: css("--grid") }, svg);
-    el("text", { x: left - 6, y: sy(t) + 4, "text-anchor": "end" }, svg).textContent = fmt(t, 0) + "s";
+    el("text", { x: left - 6, y: sy(t) + 4, "text-anchor": "end" }, svg).textContent = fmt(t, t % 1 ? 1 : 0) + "s";
   }
   for (let c = 0; c <= maxX; c++) el("text", { x: sx(c), y: H - bottom + 16, "text-anchor": "middle" }, svg).textContent = c;
   el("text", { x: (left + width - right) / 2, y: H - 4, "text-anchor": "middle" }, svg).textContent = "청크 수 (Vision 호출 수)";
@@ -399,65 +400,94 @@ function renderCost(width) {
   });
 }
 
+// 부하 결과 하나 = 한 부하 모델(closed: x=동시 사용자, open: x=분당 도착 건수)
+const loadX = (l) => (l.model === "open" ? l.arrival_rpm : l.concurrency);
+const loadXLabel = (model) => (model === "open" ? "분당 도착 건수" : "동시 사용자 수");
+
+function loadPanel(box, results, key, title, panelW) {
+  const wrap = h("div", null, box); h("h3", title, wrap);
+  const H = 220, left = 44, right = 16, top = 12, bottom = 36;
+  const xs = [...new Set(results.flatMap(([r]) => r.levels.map(loadX)))].sort((a, b) => a - b);
+  const maxY = niceMax(Math.max(...results.flatMap(([r]) => r.levels.map((l) => l[key] || 0))));
+  const svg = el("svg", { viewBox: `0 0 ${panelW} ${H}` }, h("div", null, wrap));
+  const sx = (v) => left + (xs.indexOf(v) / Math.max(xs.length - 1, 1)) * (panelW - left - right);
+  const sy = (v) => H - bottom - (v / maxY) * (H - top - bottom);
+  for (const t of ticks(maxY, 4)) {
+    el("line", { x1: left, x2: panelW - right, y1: sy(t), y2: sy(t), stroke: css("--grid") }, svg);
+    el("text", { x: left - 6, y: sy(t) + 4, "text-anchor": "end" }, svg).textContent = fmt(t, t % 1 ? 1 : 0) + "s";
+  }
+  xs.forEach((x) => (el("text", { x: sx(x), y: H - bottom + 16, "text-anchor": "middle" }, svg).textContent = x));
+  el("text", { x: (left + panelW - right) / 2, y: H - 4, "text-anchor": "middle" }, svg).textContent = loadXLabel(results[0][0].model);
+  for (const [r, i] of results) {
+    const pts = r.levels.filter((l) => l[key] != null);
+    el("polyline", { points: pts.map((l) => `${sx(loadX(l))},${sy(l[key])}`).join(" "), fill: "none", stroke: css(labelColor(i)), "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round" }, svg);
+    for (const l of pts) {
+      const g = el("g", {}, svg);
+      el("circle", { cx: sx(loadX(l)), cy: sy(l[key]), r: 12, fill: "transparent" }, g);
+      el("circle", { cx: sx(loadX(l)), cy: sy(l[key]), r: 4, fill: css(labelColor(i)), stroke: css("--surface"), "stroke-width": 2 }, g);
+      const server = l.server ? `서버 안쪽 p50 ${fmt(l.server.total_p50_s)}s` : "서버 로그 없음";
+      bindTip(g, [[fmt(l[key]) + "s", `${r.label} · ${loadXLabel(l.model)} ${loadX(l)}`], [`${l.throughput_rpm} req/min`, `에러 ${fmt(l.error_rate * 100, 0)}% · ${server}`]]);
+    }
+  }
+}
+
 function renderLoad(width) {
   const box = $("load"); box.replaceChildren(); $("load-table").replaceChildren();
   legend("legend-load", LOAD.map((r, i) => [`${r.label} (${r.case.id})`, labelColor(i)]), true);
   if (!LOAD.length) { $("load-note").textContent = ""; h("div", "부하 테스트 결과 없음", box, "empty"); return; }
-  $("load-note").textContent = "Vision은 실측 지연 분포를 재현한 mock. 여기서 드러나는 병목은 서버 쪽(threadpool·CPU)이다.";
+  const tools = [...new Set(LOAD.map((r) => r.tool).filter(Boolean))].join(", ");
+  $("load-note").textContent = `${tools || "k6"} · Vision은 실측 지연 분포를 재현한 mock이라, 여기서 드러나는 병목은 서버 쪽(threadpool·CPU)이다. 서버 안쪽 p50 = 서버 로그의 analyze() 시간 — 클라이언트 p50과의 차이가 서버에 들어가기 전 대기다.`;
   const panelW = width > 640 ? (width - 16) / 2 : width;
-  for (const [key, title] of [["p50_s", "p50 응답시간"], ["p95_s", "p95 응답시간"]]) {
-    const wrap = h("div", null, box); h("h3", title, wrap);
-    const H = 220, left = 44, right = 16, top = 12, bottom = 36;
-    const xs = [...new Set(LOAD.flatMap((r) => r.levels.map((l) => l.concurrency)))].sort((a, b) => a - b);
-    const maxY = niceMax(Math.max(...LOAD.flatMap((r) => r.levels.map((l) => l[key] || 0))));
-    const svg = el("svg", { viewBox: `0 0 ${panelW} ${H}` }, h("div", null, wrap));
-    const sx = (v) => left + (xs.indexOf(v) / Math.max(xs.length - 1, 1)) * (panelW - left - right);
-    const sy = (v) => H - bottom - (v / maxY) * (H - top - bottom);
-    for (const t of ticks(maxY, 4)) {
-      el("line", { x1: left, x2: panelW - right, y1: sy(t), y2: sy(t), stroke: css("--grid") }, svg);
-      el("text", { x: left - 6, y: sy(t) + 4, "text-anchor": "end" }, svg).textContent = fmt(t, 0) + "s";
-    }
-    xs.forEach((x) => (el("text", { x: sx(x), y: H - bottom + 16, "text-anchor": "middle" }, svg).textContent = x));
-    el("text", { x: (left + panelW - right) / 2, y: H - 4, "text-anchor": "middle" }, svg).textContent = "동시 사용자 수";
-    LOAD.forEach((r, i) => {
-      const pts = r.levels.filter((l) => l[key] != null);
-      el("polyline", { points: pts.map((l) => `${sx(l.concurrency)},${sy(l[key])}`).join(" "), fill: "none", stroke: css(labelColor(i)), "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round" }, svg);
-      for (const l of pts) {
-        const g = el("g", {}, svg);
-        el("circle", { cx: sx(l.concurrency), cy: sy(l[key]), r: 12, fill: "transparent" }, g);
-        el("circle", { cx: sx(l.concurrency), cy: sy(l[key]), r: 4, fill: css(labelColor(i)), stroke: css("--surface"), "stroke-width": 2 }, g);
-        bindTip(g, [[fmt(l[key]) + "s", `${r.label} · 동시 ${l.concurrency}명`], [`${l.throughput_rpm} req/min`, `에러 ${fmt(l.error_rate * 100, 0)}%`]]);
-      }
-    });
+  const indexed = LOAD.map((r, i) => [r, i]);
+  const closed = indexed.filter(([r]) => r.model !== "open"), open = indexed.filter(([r]) => r.model === "open");
+  if (closed.length) {
+    loadPanel(box, closed, "p50_s", "p50 응답시간 · closed (동시 사용자)", panelW);
+    loadPanel(box, closed, "p95_s", "p95 응답시간 · closed (동시 사용자)", panelW);
+  }
+  if (open.length) {
+    loadPanel(box, open, "p50_s", "p50 응답시간 · open (도착률)", panelW);
+    loadPanel(box, open, "p95_s", "p95 응답시간 · open (도착률)", panelW);
   }
   const t = h("table", null, $("load-table"));
   const hr = h("tr", null, h("thead", null, t));
-  for (const c of ["측정", "동시", "요청", "성공", "p50", "p95", "최대", "처리량", "에러율"]) h("th", c, hr);
+  for (const c of ["측정", "모델", "부하", "요청", "성공", "p50", "p95", "최대", "서버 p50", "처리량", "에러율", "dropped", "threshold"]) h("th", c, hr);
   const tb = h("tbody", null, t);
   for (const r of LOAD) for (const l of r.levels) {
     const tr = h("tr", null, tb);
-    for (const v of [r.label, l.concurrency, l.total_requests, l.success, fmt(l.p50_s) + "s", fmt(l.p95_s) + "s", fmt(l.max_s) + "s", l.throughput_rpm + "/min", fmt(l.error_rate * 100, 0) + "%"]) h("td", v, tr);
+    const load = l.model === "open" ? `${l.arrival_rpm}/min 도착` : `동시 ${l.concurrency}명`;
+    for (const v of [r.label, l.model || "closed", load, l.total_requests, l.success, fmt(l.p50_s) + "s", fmt(l.p95_s) + "s", fmt(l.max_s) + "s", l.server ? fmt(l.server.total_p50_s) + "s" : "–", l.throughput_rpm + "/min", fmt(l.error_rate * 100, 0) + "%", l.dropped_iterations ?? "–"]) h("td", v, tr);
+    const ok = l.thresholds_passed;
+    h("td", ok == null ? "–" : ok ? "✓ 통과" : "✗ 실패", tr, ok == null ? "" : ok ? "good" : "bad");
   }
 }
 
 function renderAccuracy() {
   const box = $("accuracy"); box.replaceChildren();
   if (!LAT.length) { h("div", "단건 측정 결과 없음", box, "empty"); return; }
+  // 실행별 값: 항목 수는 서버 로그(모든 결과 파일에 있음), 리스크 이슈 수는 실행별 signature(없으면 첫 실행 스냅샷)
+  const perRun = (r, caseId, pick) => runsOf(r, caseId).map((q) => pick(q, r)).filter((v) => v != null);
+  const items = (q) => q.server.line_item_count;
+  const risks = (q, r) => (q.signature ? q.signature.total_risk_items : null);
+  const span = (vals) => (vals.length ? `${Math.min(...vals)}~${Math.max(...vals)}` : "–");
+  const list = (vals) => (vals.length ? vals.join("·") : "–");
   const t = h("table", null, box);
   const hr = h("tr", null, h("thead", null, t));
   h("th", "케이스", hr);
-  LAT.forEach((r, i) => { h("th", `${r.label} 항목`, hr); h("th", "이슈", hr); if (i) h("th", "동일", hr); });
+  LAT.forEach((r, i) => { h("th", `${r.label} 항목 수`, hr); h("th", "리스크 이슈 수", hr); if (i) h("th", "판정 (항목 수)", hr); });
   const tb = h("tbody", null, t);
   for (const c of allCases()) {
     const tr = h("tr", null, tb); h("td", c.id, tr);
-    const base = LAT[0].snapshots[c.id];
+    const baseItems = perRun(LAT[0], c.id, items);
     LAT.forEach((r, i) => {
-      const s = r.snapshots[c.id];
-      h("td", s ? `${s.line_item_count ?? "–"} (정상 ${s.normal_item_count})` : "–", tr);
-      h("td", s ? s.total_risk_items : "–", tr);
+      const it = perRun(r, c.id, items);
+      let rk = perRun(r, c.id, risks);
+      if (!rk.length && r.snapshots && r.snapshots[c.id]) rk = [r.snapshots[c.id].total_risk_items];
+      h("td", list(it), tr); h("td", list(rk), tr);
       if (i) {
-        const same = s && base && JSON.stringify(s.issues) === JSON.stringify(base.issues) && s.normal_item_count === base.normal_item_count;
-        h("td", !s || !base ? "–" : same ? "✓ 동일" : "✗ 다름", tr, !s || !base ? "" : same ? "good" : "bad");
+        if (!it.length || !baseItems.length) { h("td", "–", tr); return; }
+        const m = median(it), lo = Math.min(...baseItems), hi = Math.max(...baseItems);
+        const inRange = m >= lo && m <= hi;
+        h("td", inRange ? `✓ 범위 안 (${span(baseItems)})` : `△ 범위 밖 (${span(baseItems)})`, tr, inRange ? "good" : "bad");
       }
     });
   }

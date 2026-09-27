@@ -1,5 +1,5 @@
 """
-scripts/bench/report.py — bench_latency / bench_load 결과 JSON을 모아 HTML 리포트 한 장으로 만든다.
+scripts/bench/report.py — bench_latency / k6_result 결과 JSON을 모아 HTML 리포트 한 장으로 만든다.
 
 외부 라이브러리·CDN 없이 인라인 SVG로 그리는 단일 파일이라, 브라우저로 바로 열거나 그대로
 공유할 수 있다. 결과 파일을 넘긴 순서가 곧 비교 순서다 (첫 번째 = 기준, 예: baseline).

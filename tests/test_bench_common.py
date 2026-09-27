@@ -11,8 +11,10 @@ from scripts.bench.common import (
     count_chunks,
     percentile,
     read_events,
+    read_events_named,
     result_signature,
 )
+from scripts.bench.k6_result import levels_from_points, scenario_meta, server_side_stats, thresholds_by_scenario
 from scripts.bench.report import build_report
 
 
@@ -102,3 +104,78 @@ def test_build_report_embeds_results_and_escapes_script_close(tmp_path):
     assert '"__BENCH_DATA__"' not in html
     assert "<\\/script><b>x" in html
     assert html.count("</script>") == 1
+
+
+def test_read_events_named_collects_event_regardless_of_request_id(tmp_path):
+    log = tmp_path / "app.log"
+    log.write_text("\n".join([
+        json.dumps(_event("risk_analyze_timing", 1.0, rid="a", total_s=1.0)),
+        json.dumps(_event("http_request", 1.1, rid="a", duration_ms=1.0)),
+        json.dumps(_event("risk_analyze_timing", 2.0, rid="b", total_s=2.0)),
+    ]) + "\n", encoding="utf-8")
+
+    assert [e["total_s"] for e in read_events_named(log, "risk_analyze_timing")] == [1.0, 2.0]
+
+
+def _point(metric, value, scenario, end_s, ok=True):
+    tags = {"scenario": scenario, "case": "S3", "expected_response": "true" if ok else "false"}
+    return {"type": "Point", "metric": metric,
+            "data": {"time": f"2026-09-27T10:00:{end_s:06.3f}+00:00", "value": value, "tags": tags}}
+
+
+def test_levels_from_points_uses_end_time_minus_duration_as_start():
+    points = [
+        _point("http_req_duration", 5000, "c2", 10.0), _point("http_req_failed", 0, "c2", 10.0),
+        _point("http_req_duration", 7000, "c2", 13.0), _point("http_req_failed", 0, "c2", 13.0),
+        _point("http_req_duration", 100, "c2", 13.5, ok=False), _point("http_req_failed", 1, "c2", 13.5),
+        _point("http_req_duration", 999, "setup", 1.0),  # setup()의 /bench/info 요청은 제외
+    ]
+
+    level = levels_from_points(points)["c2"]
+
+    assert level["concurrency"] == 2 and level["model"] == "closed"
+    assert level["total_requests"] == 3
+    assert level["success"] == 2
+    assert level["error_rate"] == pytest.approx(0.3333, abs=1e-4)
+    assert level["p50_s"] == 6.0  # 실패 요청은 응답시간 통계에서 제외
+    start, end = level["window"]
+    assert end - start == pytest.approx(8.5)  # 첫 요청 시작(5.0초) ~ 마지막 종료(13.5초)
+    assert level["throughput_rpm"] == pytest.approx(2 / 8.5 * 60, abs=0.01)
+
+
+def test_levels_from_points_counts_dropped_iterations_for_open_model():
+    points = [_point("http_req_duration", 1000, "r4", 5.0), _point("dropped_iterations", 1, "r4", 6.0),
+              _point("dropped_iterations", 1, "r4", 7.0)]
+
+    level = levels_from_points(points)["r4"]
+
+    assert level["model"] == "open" and level["arrival_rpm"] == 4
+    assert level["dropped_iterations"] == 2
+
+
+def test_scenario_meta_rejects_unknown_names():
+    with pytest.raises(ValueError):
+        scenario_meta("default")
+
+
+def test_thresholds_by_scenario_inverts_summary_export_flag():
+    # summary-export는 기준을 넘으면(실패) true를 기록한다
+    summary = {"metrics": {
+        "http_req_duration{scenario:c5}": {"thresholds": {"p(95)<120000": True}},
+        "http_req_failed{scenario:c5}": {"thresholds": {"rate<0.01": False}},
+        "http_req_duration": {"thresholds": {"p(95)<1": True}},
+    }}
+
+    result = thresholds_by_scenario(summary)
+
+    assert result == {"c5": {"http_req_duration{scenario:c5}: p(95)<120000": False,
+                             "http_req_failed{scenario:c5}: rate<0.01": True}}
+
+
+def test_server_side_stats_medians():
+    events = [{"parse_images_s": p, "price_check_s": 0.5, "total_s": p + 0.5} for p in (10.0, 20.0, 30.0)]
+
+    stats = server_side_stats(events)
+
+    assert stats == {"requests": 3, "parse_images_p50_s": 20.0, "price_check_p50_s": 0.5, "total_p50_s": 20.5}
+    assert server_side_stats([]) is None

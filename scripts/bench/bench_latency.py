@@ -139,8 +139,11 @@ def main() -> None:
                 MODEL, server["input_tokens"], server["output_tokens"],
                 server["cache_creation_input_tokens"], server["cache_read_input_tokens"],
             ), 6)
-        if body and not r["warmup"] and r["case_id"] not in snapshots:
-            snapshots[r["case_id"]] = {"line_item_count": server and server["line_item_count"], **result_signature(body)}
+        if body and not r["warmup"]:
+            # 실행마다 남긴다 — 같은 입력이어도 모델 출력이 실행마다 조금씩 달라서(베이스라인 S1 항목 수 28·30·28),
+            # 개선 전후 비교는 "첫 실행과 같은가"가 아니라 "실행 간 변동 범위 안인가"로 봐야 한다
+            r["signature"] = {"line_item_count": server and server["line_item_count"], **result_signature(body)}
+            snapshots.setdefault(r["case_id"], r["signature"])
 
     missing = [r["request_id"] for r in requests if r["status"] == 200 and not r["server"]]
     if missing:
