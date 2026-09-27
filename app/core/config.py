@@ -34,6 +34,14 @@ class Settings(BaseSettings):
     mongo_max_pool_size: int = 20
     mongo_server_selection_timeout_ms: int = 5000
 
+    # 리스크 진단 Vision 호출의 프로세스 전체 동시 실행 상한 (청크 호출을 동시에 보내므로 필요).
+    # 베이스라인 부하 테스트에서 동시 20명일 때 사실상 20개가 동시에 돌았고 문제가 없었다 — 그 수준을 기본값으로.
+    # 올리면 동시 사용자가 많을 때 처리량이 늘지만 Anthropic 조직 rate limit(분당 요청·토큰)에 먼저 닿는다.
+    risk_vision_max_concurrency: int = 20
+    # 요청 하나가 동시에 쓸 수 있는 Vision 호출 수. 업로드 이미지 수 제한이 없어 큰 요청 하나가 전역 슬롯을
+    # 독점하는 걸 막는다. 8이면 테스트셋 최대(S4, 8청크)까지는 전부 한 번에 돌고, 그보다 큰 요청만 나눠서 돈다.
+    risk_vision_max_concurrency_per_request: int = 8
+
 
 @lru_cache
 def get_settings() -> Settings:
