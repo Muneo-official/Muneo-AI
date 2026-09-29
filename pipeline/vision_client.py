@@ -18,7 +18,7 @@ import anthropic
 from pipeline.crawl_filter import is_boilerplate
 from pipeline.image_prep import prepare_chunks
 from pipeline.parsing import merge_chunk_results
-from pipeline.tool_schema import ESTIMATE_TOOL, TOOL_NAME, TOOL_USE_INSTRUCTIONS
+from pipeline.tool_schema import ESTIMATE_TOOL, RISK_ESTIMATE_TOOL, TOOL_NAME, TOOL_USE_INSTRUCTIONS
 
 MODEL = "claude-sonnet-4-6"
 MAX_TOKENS = 8192
@@ -59,11 +59,20 @@ def get_async_client() -> anthropic.AsyncAnthropic:
 
 
 def build_api_params(image_bytes: bytes) -> dict:
-    """실시간·배치 공용 API 파라미터. tool use로 category를 enum 강제한다."""
+    """크롤링 수집(배치)·동기 호출용 API 파라미터. tool use로 category를 enum 강제한다."""
+    return _build_image_params(image_bytes, ESTIMATE_TOOL)
+
+
+def build_risk_api_params(image_bytes: bytes) -> dict:
+    """리스크 진단(실시간) 전용 — 출력 스키마만 RISK_ESTIMATE_TOOL(unit·quantity 제외)로 바꾸고 나머지는 같다."""
+    return _build_image_params(image_bytes, RISK_ESTIMATE_TOOL)
+
+
+def _build_image_params(image_bytes: bytes, tool: dict) -> dict:
     return {
         "model": MODEL,
         "max_tokens": MAX_TOKENS,
-        "tools": [ESTIMATE_TOOL],
+        "tools": [tool],
         "tool_choice": {"type": "tool", "name": TOOL_NAME},
         "messages": [{
             "role": "user",
@@ -155,10 +164,14 @@ def call_vision_api_with_usage(
 async def acall_vision_api_with_usage(
     image_bytes: bytes, client: anthropic.AsyncAnthropic | None = None
 ) -> VisionCallResult:
-    """call_vision_api_with_usage()의 비동기 버전 — 요청 파라미터와 결과 형태는 동일하다."""
+    """리스크 진단(실시간) 전용 비동기 호출 — 결과 형태는 call_vision_api_with_usage()와 같다.
+
+    요청은 build_risk_api_params()로 보낸다(unit·quantity를 뺀 출력 스키마). 이 함수는 리스크 진단만 쓰고,
+    크롤링 수집은 동기 경로(build_api_params, 전체 스키마)를 그대로 쓴다.
+    """
     client = client or get_async_client()
     started = time.perf_counter()
-    response = await client.messages.create(**build_api_params(image_bytes))
+    response = await client.messages.create(**build_risk_api_params(image_bytes))
     return _to_call_result(response, time.perf_counter() - started)
 
 

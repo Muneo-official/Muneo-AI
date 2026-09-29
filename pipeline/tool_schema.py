@@ -12,6 +12,8 @@ CATEGORY_NORM을 통한 사후 정규화(normalize_category)가 새로 파싱되
 사라지기 때문. (기존에 쌓인 데이터를 재검증할 때는 여전히 normalize_category가 필요하다.)
 """
 
+import copy
+
 from pipeline.categories import NORMALIZED_CATEGORIES
 
 TOOL_NAME = "record_estimate"
@@ -62,6 +64,19 @@ ESTIMATE_TOOL = {
         "required": ["is_estimate"],
     },
 }
+
+# 리스크 진단(실시간) 전용 — ESTIMATE_TOOL에서 룰이 쓰지 않는 unit·quantity만 뺀다.
+# 비용의 약 80%가 출력 토큰이라, 항목마다 반복되는 필드를 줄이면 비용과 호출 시간이 같이 준다
+# (출력 JSON 토큰 −22.5%, docs/RISK_DETECTOR_COST_LOG.md 2장).
+# - code는 남긴다: 청크 중복 제거 키(parsing._chunk_dedup_key)에서 행 식별자 역할을 한다.
+#   빼면 대체 키(품명 앞 4글자)가 서로 다른 행을 합쳐 코퍼스 571건 중 243건에서 항목이 사라졌다
+# - unit_price는 남긴다: 단가 누락 룰(risk_analyzer)의 유일한 트리거다
+# - 크롤링 수집(배치)은 ESTIMATE_TOOL을 그대로 쓴다 — 수집 데이터는 가견적 코퍼스가 되므로 줄이지 않는다
+# ESTIMATE_TOOL에서 파생시켜 카테고리 enum·설명이 두 경로에서 어긋나지 않게 한다.
+RISK_DROPPED_ITEM_FIELDS = ("unit", "quantity")
+RISK_ESTIMATE_TOOL = copy.deepcopy(ESTIMATE_TOOL)
+for _field in RISK_DROPPED_ITEM_FIELDS:
+    del RISK_ESTIMATE_TOOL["input_schema"]["properties"]["line_items"]["items"]["properties"][_field]
 
 # tool use와 함께 쓰는 지시문 — 표/집계행 판별, total_cost 산정, 열 뒤바뀜 수정 등은
 # pipeline/prompts.py의 규칙 1~6과 동일하되, category 표준화(규칙 7/7-1)는 enum이
