@@ -3,6 +3,7 @@ import pathlib
 from PIL import Image
 
 from pipeline.batch_client import RequestMeta, build_batch_requests
+from pipeline.tool_schema import ESTIMATE_TOOL
 
 
 def _make_image(path: pathlib.Path, height: int) -> str:
@@ -59,11 +60,12 @@ def test_build_batch_requests_pdf_single_request_no_chunking(tmp_path: pathlib.P
 
 
 def test_build_batch_requests_params_use_tool_use(tmp_path: pathlib.Path):
-    # 실시간 경로(pipeline/vision_client.py)와 동일한 build_api_params를 재사용해야
-    # 배치도 category enum 강제가 똑같이 적용된다.
+    # vision_client의 build_api_params를 재사용해야 배치도 category enum 강제가 똑같이 적용된다.
+    # 리스크 진단 전용 축소 스키마(RISK_ESTIMATE_TOOL)가 아니라 전체 스키마를 써야 한다 — 수집 데이터는 코퍼스가 된다.
     img = _make_image(tmp_path / "a.png", height=500)
     requests, _ = build_batch_requests([("123", [img])])
 
     params = requests[0]["params"]
     assert params["tool_choice"] == {"type": "tool", "name": "record_estimate"}
     assert params["tools"][0]["name"] == "record_estimate"
+    assert params["tools"] == [ESTIMATE_TOOL]

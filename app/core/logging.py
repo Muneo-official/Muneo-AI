@@ -20,6 +20,10 @@ def set_request_id(request_id: str) -> None:
     _request_id.set(request_id)
 
 
+def get_request_id() -> str | None:
+    return _request_id.get()
+
+
 def configure_logging(level: int = logging.INFO) -> None:
     handlers: list[logging.Handler] = [logging.StreamHandler(sys.stdout)]
 
