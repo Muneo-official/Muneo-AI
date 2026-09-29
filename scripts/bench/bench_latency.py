@@ -4,8 +4,12 @@ scripts/bench/bench_latency.py — 단건 응답시간·비용 측정 (실제 Vi
 bench 서버(scripts/bench/server.py, real 모드)에 케이스별로 실제 multipart 요청을 N회 보내고,
   - 클라이언트: 요청 전송~응답 수신 wall time (사용자가 실제로 기다리는 시간)
   - 서버: 응답 헤더 X-Request-Id로 logs/app.log의 구간 시간·Vision 호출 타임라인·토큰
-을 묶어서 logs/bench/latency_<label>_<시각>.json에 저장한다. 케이스별 첫 성공 응답은
-정확도 비교용 스냅샷(result_signature)으로 같이 남긴다.
+을 묶어서 logs/bench/latency_<label>_<시각>.json에 저장한다. 성공한 실행마다 정확도 비교용
+요약(signature)을 남긴다.
+
+서버가 파싱 결과를 캡처하면(real 모드, /bench/info의 capture) 요청마다 청크별 원본 모델 출력과
+룰 분석에 들어간 최종 항목을 가져와 같이 저장하고, signature에 공종별 금액·total_cost를 더한다
+(정확도 판정: scripts/bench/accuracy.py).
 
 사용법:
   python -m scripts.bench.bench_latency --label baseline
@@ -26,12 +30,15 @@ from scripts.bench.common import (
     DEFAULT_CASES_FILE,
     DEFAULT_LOG_FILE,
     PRICING_CHECKED_AT,
+    assign_chunk_indices,
     build_server_record,
+    case_chunk_digests,
     cost_usd,
     form_fields,
     git_commit,
     load_cases,
     log_size,
+    parse_metrics,
     percentile,
     read_events,
     result_signature,
@@ -60,6 +67,15 @@ def _post(client: httpx.Client, case: dict) -> dict:
     else:
         out["error"] = resp.text[:500]
     return out
+
+
+def _fetch_capture(client: httpx.Client, request_id: str, digests: dict) -> dict | None:
+    resp = client.get(f"/bench/capture/{request_id}")
+    if resp.status_code != 200:
+        return None
+    raw = resp.json()
+    calls, unmatched = assign_chunk_indices(raw["vision_calls"], digests)
+    return {"vision_calls": calls, "unmatched_calls": unmatched, "line_items": raw["line_items"] or []}
 
 
 def _confirm(cases: list[dict], runs: int, warmup: int) -> bool:
@@ -113,8 +129,13 @@ def main() -> None:
         info = client.get("/bench/info").json()
         if info.get("vision") != "real":
             raise SystemExit(f"서버가 real 모드가 아닙니다: {info} — mock 결과로 비용·지연을 재면 안 됩니다.")
+        print(f"서버: {info}")
         if not args.yes and not _confirm(cases, args.runs, args.warmup):
             return
+        capture = bool(info.get("capture"))
+        digests = {c["id"]: case_chunk_digests(c) for c in cases} if capture else {}
+        if not capture:
+            print("[WARN] 서버가 파싱 결과를 캡처하지 않습니다 — 공종별 금액 지표 없이 측정합니다.")
 
         offset = log_size(args.log_file)
         started_at = datetime.now().isoformat(timespec="seconds")
@@ -126,6 +147,12 @@ def main() -> None:
             print(f"[{n}/{len(plan)}] {case['id']} {tag} ...", end=" ", flush=True)
             result = _post(client, case)
             print(f"{result['status']} {result['wall_s']:.1f}s")
+            if capture and result.get("request_id"):
+                result["parsed"] = _fetch_capture(client, result["request_id"], digests[case["id"]])
+                parsed = result["parsed"]
+                if parsed and (parsed["unmatched_calls"] or len(parsed["vision_calls"]) != case["total_chunks"]):
+                    print(f"  [WARN] 캡처된 호출 {len(parsed['vision_calls'])}개 / 청크 {case['total_chunks']}개, "
+                          f"매칭 실패 {parsed['unmatched_calls']}개")
             requests.append({"case_id": case["id"], "warmup": warmup, "run_index": run_index, **result})
 
     events = read_events(args.log_file, {r["request_id"] for r in requests if r.get("request_id")}, offset)
@@ -143,6 +170,8 @@ def main() -> None:
             # 실행마다 남긴다 — 같은 입력이어도 모델 출력이 실행마다 조금씩 달라서(베이스라인 S1 항목 수 28·30·28),
             # 개선 전후 비교는 "첫 실행과 같은가"가 아니라 "실행 간 변동 범위 안인가"로 봐야 한다
             r["signature"] = {"line_item_count": server and server["line_item_count"], **result_signature(body)}
+            if r.get("parsed"):
+                r["signature"].update(parse_metrics(r["parsed"]["line_items"], r["parsed"]["vision_calls"]))
             snapshots.setdefault(r["case_id"], r["signature"])
 
     missing = [r["request_id"] for r in requests if r["status"] == 200 and not r["server"]]

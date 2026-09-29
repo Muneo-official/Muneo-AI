@@ -118,7 +118,9 @@ details summary { cursor: pointer; color: var(--ink-2); margin-top: 8px; }
     <div id="load-table" class="table-wrap"></div></section>
   <section class="card"><h2>정확도 비교</h2>
     <p class="muted">같은 입력이어도 모델 출력이 실행마다 조금씩 달라서, 첫 번째 측정의 실행 간 변동 범위를 기준으로 본다. 개선 후 실행들의 중앙값이 그 범위 안이면 ✓. 범위 밖이면 원인을 따로 확인한다.</p>
-    <div id="accuracy" class="table-wrap"></div></section>
+    <div id="accuracy" class="table-wrap"></div>
+    <p class="muted">지표별 판정 (파싱 결과 캡처가 있는 측정만): 항목 수 ±3%, 공종별 금액 ±5%, 공종 비중 ±3%p, 전체 금액·total_cost ±2%. 허용폭은 기준 중앙값 기준이고 기준 실행 범위보다 좁아지지 않는다.</p>
+    <div id="accuracy-judge" class="table-wrap"></div></section>
   <section class="card"><h2>원시 데이터</h2>
     <details><summary>모든 요청 보기</summary><div id="raw" class="table-wrap"></div></details></section>
 </main>
@@ -493,6 +495,25 @@ function renderAccuracy() {
   }
 }
 
+function renderJudge() {
+  const box = $("accuracy-judge"); box.replaceChildren();
+  const judged = DATA.accuracy || [];
+  if (!judged.length) { h("div", "비교할 후보 측정 없음", box, "empty"); return; }
+  const num = (v) => (v == null ? "–" : Math.abs(v) < 1000 ? fmt(v, 1) : Math.round(v).toLocaleString());
+  const t = h("table", null, box);
+  const hr = h("tr", null, h("thead", null, t));
+  for (const c of ["비교", "케이스", "판정", "범위 밖 지표 (후보 중앙값 / 허용 범위)", "판정 불가"]) h("th", c, hr);
+  const tb = h("tbody", null, t);
+  for (const j of judged) for (const [caseId, c] of Object.entries(j.cases)) {
+    const tr = h("tr", null, tb);
+    h("td", `${j.base_label} → ${j.candidate_label}`, tr); h("td", caseId, tr);
+    h("td", c.passed == null ? "– 판정 불가" : c.passed ? "✓ 통과" : "✗ 불합격", tr, c.passed == null ? "" : c.passed ? "good" : "bad");
+    const bad = c.rows.filter((r) => r.ok === false).map((r) => `${r.metric}: ${num(r.candidate_median)} / ${num(r.allowed[0])}~${num(r.allowed[1])}`);
+    h("td", bad.length ? bad.join(" · ") : "–", tr);
+    h("td", c.rows.filter((r) => r.note).map((r) => `${r.metric} (${r.note})`).join(" · ") || "–", tr);
+  }
+}
+
 function renderRaw() {
   const box = $("raw"); box.replaceChildren();
   const t = h("table", null, box);
@@ -518,7 +539,7 @@ function renderAll() {
   renderMeta(); renderSummary();
   renderWaterfall(select.value, $("waterfall").clientWidth || width);
   renderStages(width); renderScatter(width); renderCost(width);
-  renderLoad($("load").clientWidth || width); renderAccuracy(); renderRaw();
+  renderLoad($("load").clientWidth || width); renderAccuracy(); renderJudge(); renderRaw();
 }
 select.addEventListener("change", () => { try { localStorage.setItem("bench-case", select.value); } catch {} renderAll(); });
 $("theme-toggle").addEventListener("click", () => {
