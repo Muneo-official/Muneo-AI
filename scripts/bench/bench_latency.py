@@ -11,9 +11,6 @@ bench 서버(scripts/bench/server.py, real 모드)에 케이스별로 실제 mul
 룰 분석에 들어간 최종 항목을 가져와 같이 저장하고, signature에 공종별 금액·total_cost를 더한다
 (정확도 판정: scripts/bench/accuracy.py).
 
-사용법:
-  python -m scripts.bench.bench_latency --label baseline
-  python -m scripts.bench.bench_latency --label parallel --runs 3 --only S3,S4
 """
 
 import argparse
@@ -109,6 +106,7 @@ def _summarize(requests: list[dict], cases: list[dict]) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--label", required=True, help="이 측정의 이름 (예: baseline, parallel)")
+    parser.add_argument("--note", default="", help="이 측정이 어떤 방식인지 설명하는 자유 텍스트 (예: 'few-shot 캐싱')")
     parser.add_argument("--cases", type=pathlib.Path, default=DEFAULT_CASES_FILE)
     parser.add_argument("--only", default="", help="측정할 케이스 id (쉼표 구분)")
     parser.add_argument("--runs", type=int, default=3)
@@ -181,6 +179,7 @@ def main() -> None:
     path = write_result("latency", args.label, {
         "kind": "latency",
         "label": args.label,
+        "note": args.note,
         "started_at": started_at,
         "git_commit": git_commit(),
         "model": MODEL,
