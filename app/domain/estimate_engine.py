@@ -31,10 +31,12 @@ CASE_TEXT_REQUEST_CAP = 60  # _case_text()의 요청글 트렁케이션 길이. 
                             # cross-encoder가 텍스트 길이 자체에 편향돼 순위를 왜곡한다는 게
                             # 확인됨(eval/results/reranker_hybrid_eval.md) — 60이 벡터 단독
                             # 대비 precision@5/10 전부 개선되는 것으로 검증된 값.
-SIZE_RANGE         = 5    # 평수 ±5평 필터 — 원래 7이었으나, eval/results/reranker_hybrid_eval.md
-                           # 실패 분석에서 평수차이=7인 후보의 relevant 비율이 22.2%로 급락하는 게
-                           # 확인됨(0~6평 차이는 53~77%대 유지). 라벨링 기준(_suggested_relevant)의
-                           # 관용치도 원래 ±5였는데 production 필터만 더 넓게(±7) 잡혀있던 불일치.
+SIZE_RANGE         = 6    # 평수 ±6평 필터 — 7→5(a39eaf4)를 거쳐 6으로 조정. 라벨상 relevant 비율이
+                           # 평수차 6평 65.5% → 7평 22.2%로 6과 7 사이에서 급락한다.
+                           # eval/results/size_range_comparison.md: ±5와 P@15 동일(93.1%, 차이는 노이즈
+                           # 범위), 대신 쿼리당 후보가 늘고(중앙값 15→19) Stage 2 통과가 3건 미만이라
+                           # 지역 조건까지 풀리던(Stage 3) 쿼리가 없어짐. ±7은 −10.8%p로 확실히 나쁨.
+                           # 라벨 규칙(_suggested_relevant)은 순환 방지를 위해 ±5 그대로 둔다.
 MAX_SPEC_ITEMS     = 12   # 공종별 명세 최대 항목 수 (ancillary 제외)
 SPEC_RATIO         = 0.15 # 비정규화 항목 등장 비율 threshold (전체 사례 수 × 비율)
 SCOPE_COVERAGE_MIN = 0.40 # 요청 공종 비용 합계 / 사례 총 비용 최소 비율 (전체 시공용)
