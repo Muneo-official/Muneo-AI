@@ -4,32 +4,47 @@ scripts/bench/server.py — 벤치마크 전용 서버 실행 (운영 코드에 
 기본 모드(real): 운영과 같은 앱을 rate limit만 끈 채 띄운다. 단건 측정(bench_latency)이
 5/min 제한에 걸려 429가 섞이는 걸 막기 위해서다. Vision API는 실제로 호출된다(비용 발생).
 
+real 모드에선 파싱 결과도 캡처한다: Anthropic 클라이언트를 감싸 청크별 원본 모델 출력(tool_use input)을,
+RiskAnalyzer.analyze를 감싸 룰 분석에 들어간 최종 항목을 request_id별로 모아 두고
+GET /bench/capture/{request_id}로 내준다(한 번 가져가면 지운다). 출력 스키마를 바꾸는 비용 작업에서
+공종별 금액 비교·필드 제거 영향 분석에 쓴다(docs/RISK_DETECTOR_COST_LOG.md). 응답 자체는 바꾸지 않는다.
+
 mock 모드(--mock-vision): Anthropic 클라이언트만 가짜로 바꾼다. 실측 결과 파일의 호출별 지연시간 중
 하나를 무작위로 골라 그만큼 기다린 뒤 고정 파싱 결과를 돌려준다 — 실제 API가 느린 모양은
 그대로 재현하되 비용 0, Anthropic rate limit 영향 0. 이미지 전처리·룰 분석·Mongo 검색·
 리랭킹은 실제 코드를 그대로 탄다. 동시 부하 테스트(k6, load_test.js)는 이 모드에서만 돌린다.
 
+--risk-schema full: 리스크 진단이 축소 스키마(RISK_ESTIMATE_TOOL) 대신 수집용 전체 스키마를 보내게 한다.
+스키마 축소 전후를 같은 코드에서 번갈아 재려는 것 — 기준 측정을 위해 코드를 되돌릴 필요가 없다.
+
 사용법:
   python -m scripts.bench.server                                   # real
+  python -m scripts.bench.server --risk-schema full                # real, 축소 전 스키마(기준 측정용)
   python -m scripts.bench.server --mock-vision logs/bench/latency_baseline_*.json
   python -m scripts.bench.server --mock-vision-fixed 20            # 실측 전, 고정 20초
 """
 
 import argparse
 import asyncio
+import copy
 import json
 import os
 import pathlib
 import random
 import time
+from collections import defaultdict
 from types import SimpleNamespace
 
 import uvicorn
+from fastapi import HTTPException
 
+from app.core.logging import get_request_id
 from app.core.rate_limit import limiter
+from app.domain.risk_analyzer import RiskAnalyzer
 from app.main import app
 from pipeline import vision_client
 from pipeline.vision_client import MODEL
+from scripts.bench.common import params_image_digest
 
 # 30평대 전체 리모델링 견적서에서 흔히 나오는 공종 구성 — 룰 분석·가격 체크가 실제처럼 돌도록
 _MOCK_PARSE_RESULT = {
@@ -93,6 +108,41 @@ def _install_mock(latencies: list[float], seed: int) -> None:
     os.environ["ANTHROPIC_API_KEY"] = "bench-mock-mode-no-real-calls"
 
 
+_CAPTURE: dict[str, dict] = defaultdict(lambda: {"vision_calls": [], "line_items": None})
+
+
+def _install_capture() -> None:
+    """실제 클라이언트를 감싸 호출은 그대로 보내고 결과만 옆에 적어 둔다 (외부 경계에서 가로챈다 — mock과 같은 이유).
+
+    RiskAnalyzer.analyze는 클래스에서 감싼다 — 서비스 인스턴스가 언제 만들어지든 적용되도록.
+    """
+    real = vision_client.get_async_client()
+
+    async def create(**params):
+        response = await real.messages.create(**params)
+        request_id = get_request_id()  # gather로 만든 태스크도 요청의 contextvar를 복사해 간다
+        if request_id:
+            output = next((b.input for b in response.content if b.type == "tool_use"), None)
+            _CAPTURE[request_id]["vision_calls"].append({
+                "chunk_digest": params_image_digest(params),
+                "output": copy.deepcopy(output),
+                "output_tokens": response.usage.output_tokens,
+            })
+        return response
+
+    vision_client._async_client = SimpleNamespace(messages=SimpleNamespace(create=create))
+
+    original_analyze = RiskAnalyzer.analyze
+
+    def analyze(self, line_items):
+        request_id = get_request_id()
+        if request_id:
+            _CAPTURE[request_id]["line_items"] = copy.deepcopy(line_items)
+        return original_analyze(self, line_items)
+
+    RiskAnalyzer.analyze = analyze
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="127.0.0.1")
@@ -101,9 +151,14 @@ def main() -> None:
     group.add_argument("--mock-vision", type=pathlib.Path, help="지연 분포를 가져올 bench_latency 결과 JSON")
     group.add_argument("--mock-vision-fixed", type=float, help="고정 지연(초)으로 mock")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--risk-schema", choices=("risk", "full"), default="risk",
+                        help="리스크 진단 출력 스키마: risk=축소(운영과 같음), full=수집용 전체(축소 전 기준 측정용)")
     args = parser.parse_args()
 
     limiter.enabled = False
+    if args.risk_schema == "full":
+        # acall_vision_api_with_usage가 모듈 전역 이름으로 찾으므로 여기서 바꾸면 리스크 경로 요청만 바뀐다
+        vision_client.build_risk_api_params = vision_client.build_api_params
     if args.mock_vision:
         latencies = _latencies_from_results(args.mock_vision)
         _install_mock(latencies, args.seed)
@@ -112,11 +167,18 @@ def main() -> None:
         _install_mock([args.mock_vision_fixed], args.seed)
         mode = {"vision": "mock", "latency_source": f"fixed {args.mock_vision_fixed}s", "latency_samples": 1}
     else:
-        mode = {"vision": "real", "model": MODEL}
+        _install_capture()
+        mode = {"vision": "real", "model": MODEL, "capture": True, "risk_schema": args.risk_schema}
 
     @app.get("/bench/info")
     async def bench_info() -> dict:
         return {"rate_limit": "disabled", **mode}
+
+    @app.get("/bench/capture/{request_id}")
+    async def bench_capture(request_id: str) -> dict:
+        if request_id not in _CAPTURE:
+            raise HTTPException(404, "캡처 없음 — real 모드가 아니거나 이미 가져간 요청")
+        return _CAPTURE.pop(request_id)
 
     print(f"[bench server] {mode} · rate limit 비활성 · http://{args.host}:{args.port}")
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")

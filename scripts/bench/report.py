@@ -16,6 +16,7 @@ import json
 import pathlib
 import sys
 
+from scripts.bench.accuracy import judge
 from scripts.bench.common import BENCH_DIR
 
 for _stream in (sys.stdout, sys.stderr):
@@ -31,6 +32,9 @@ def build_report(result_paths: list[pathlib.Path]) -> str:
     for path in result_paths:
         result = json.loads(path.read_text(encoding="utf-8"))
         data[result["kind"]].append(result)
+    # 첫 단건 측정을 기준으로 나머지 각각을 판정 (scripts/bench/accuracy.py — 공종별 금액·분포 포함)
+    # latency 없이 load(k6) 결과만 넘기는 것도 지원 대상이라(예: 부하 리포트만 뽑을 때), 기준이 없으면 스킵한다
+    data["accuracy"] = [judge(data["latency"][0], cand) for cand in data["latency"][1:]] if data["latency"] else []
     # </script> 조기 종료 방지 — JSON 안의 "</"를 이스케이프
     payload = json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
     return TEMPLATE.read_text(encoding="utf-8").replace(PLACEHOLDER, payload)
