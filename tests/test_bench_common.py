@@ -292,3 +292,15 @@ def test_judge_marks_metrics_missing_from_old_baseline_as_undecidable():
     assert case["passed"] is True
     assert _rows(case["rows"])["전체 금액 합계"]["note"] == "기준에 지표 없음"
     assert not any(r["metric"].startswith("금액 ·") for r in case["rows"])
+
+
+def test_judge_case_records_total_cost_without_judging():
+    # total_cost는 합계 행 선택이 달라질 수 있어 옳고 그름을 "기준과 같은가"로 못 본다 — 달라져도 불합격이 아니다
+    base = [_sig(28, {"도배": 1000}, total_cost=7_386_000)] * 3
+    cand = [_sig(28, {"도배": 1000}, total_cost=7_900_000)] * 3
+
+    rows = judge_case(base, cand)
+
+    assert _rows(rows)["total_cost (기록만)"]["ok"] is None
+    assert _rows(rows)["total_cost (기록만)"]["candidate"] == [7_900_000] * 3
+    assert all(r["ok"] is not False for r in rows)

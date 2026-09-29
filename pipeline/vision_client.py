@@ -64,7 +64,7 @@ def build_api_params(image_bytes: bytes) -> dict:
 
 
 def build_risk_api_params(image_bytes: bytes) -> dict:
-    """리스크 진단(실시간) 전용 — 출력 스키마만 RISK_ESTIMATE_TOOL(unit·quantity 제외)로 바꾸고 나머지는 같다."""
+    """리스크 진단(실시간) 전용 — 출력 스키마만 RISK_ESTIMATE_TOOL(unit·quantity 제외, code 필수, 필름 분류 규칙)로 바꾸고 나머지는 같다."""
     return _build_image_params(image_bytes, RISK_ESTIMATE_TOOL)
 
 

@@ -65,18 +65,34 @@ ESTIMATE_TOOL = {
     },
 }
 
-# 리스크 진단(실시간) 전용 — ESTIMATE_TOOL에서 룰이 쓰지 않는 unit·quantity만 뺀다.
+# 리스크 진단(실시간) 전용 — ESTIMATE_TOOL에서 룰이 쓰지 않는 unit·quantity를 뺀다.
 # 비용의 약 80%가 출력 토큰이라, 항목마다 반복되는 필드를 줄이면 비용과 호출 시간이 같이 준다
-# (출력 JSON 토큰 −22.5%, docs/RISK_DETECTOR_COST_LOG.md 2장).
+# (실측 요청당 비용 −21~29%, docs/RISK_DETECTOR_COST_LOG.md 5장).
 # - code는 남긴다: 청크 중복 제거 키(parsing._chunk_dedup_key)에서 행 식별자 역할을 한다.
 #   빼면 대체 키(품명 앞 4글자)가 서로 다른 행을 합쳐 코퍼스 571건 중 243건에서 항목이 사라졌다
 # - unit_price는 남긴다: 단가 누락 룰(risk_analyzer)의 유일한 트리거다
+# - quantity는 뺀다: 열 뒤바뀜 보정(_fix_column_swap)의 입력이지만, 실측 원본 출력 941개 항목에서 보정이 한 번도
+#   필요 없었다(모델이 지시문대로 직접 바로잡음)
 # - 크롤링 수집(배치)은 ESTIMATE_TOOL을 그대로 쓴다 — 수집 데이터는 가견적 코퍼스가 되므로 줄이지 않는다
 # ESTIMATE_TOOL에서 파생시켜 카테고리 enum·설명이 두 경로에서 어긋나지 않게 한다.
+#
+# code는 필수로 바꾼다: 필드를 뺀 스키마에서 모델이 한 청크의 code를 통째로 생략했다(S3 청크 하나, 3/3회 0/72개,
+# 전체 스키마에선 72/72개). 청크마다 code 유무가 다르면 중복 제거 키가 청크마다 달라져(code 키 ↔ 품명 대체 키)
+# 겹침 구간 행이 두 번 남는다. 코드 열이 없는 견적서는 빈 문자열 → 모든 청크가 같은 대체 키를 쓴다.
+#
+# category 설명에 필름 규칙을 더한다: 필드를 뺀 스키마에서 "필름시공(샷시,문,틀,붙박이,현관 등)"을 3/3회 창호로
+# 분류해 필름 가격 이상 이슈가 사라졌다. 가격 체크 코퍼스의 정규화 규칙(시트공사→필름)과 같은 내용이다.
 RISK_DROPPED_ITEM_FIELDS = ("unit", "quantity")
+RISK_FILM_CATEGORY_RULE = "필름·시트지 시공은 붙이는 대상(샷시·문·문틀·붙박이장 등)과 관계없이 '필름'으로 분류한다."
 RISK_ESTIMATE_TOOL = copy.deepcopy(ESTIMATE_TOOL)
+_risk_item_schema = RISK_ESTIMATE_TOOL["input_schema"]["properties"]["line_items"]["items"]
 for _field in RISK_DROPPED_ITEM_FIELDS:
-    del RISK_ESTIMATE_TOOL["input_schema"]["properties"]["line_items"]["items"]["properties"][_field]
+    del _risk_item_schema["properties"][_field]
+_risk_item_schema["properties"]["code"]["description"] = (
+    "견적서의 코드(항목 번호) 열 값. 코드 열이 있으면 모든 행에 빠짐없이 채우고, 코드 열이 없는 견적서면 빈 문자열."
+)
+_risk_item_schema["properties"]["category"]["description"] += " " + RISK_FILM_CATEGORY_RULE
+_risk_item_schema["required"] = ["code", *_risk_item_schema["required"]]
 
 # tool use와 함께 쓰는 지시문 — 표/집계행 판별, total_cost 산정, 열 뒤바뀜 수정 등은
 # pipeline/prompts.py의 규칙 1~6과 동일하되, category 표준화(규칙 7/7-1)는 enum이

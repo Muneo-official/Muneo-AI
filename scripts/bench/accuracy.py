@@ -10,8 +10,15 @@ scripts/bench/accuracy.py — 기준 측정 대비 후보 측정의 파싱 정�
 | 항목 수 | ±3% |
 | 공종별 금액 합계 | ±5% (공종마다) |
 | 공종 분포 (금액 비중) | ±3%p (공종마다) |
-| 전체 금액 합계 / total_cost | ±2% |
+| 전체 금액 합계 | ±2% |
+| total_cost | 판정 안 함, 기록만 (아래) |
 | 리스크 이슈 수 | 판정 안 함, 기록만 (기준에서도 S1 1↔4개로 흔들림) |
+
+total_cost를 기록만 하는 이유: 합계 행이 여럿인 견적서(공사비 / 공과잡비 포함 합계 / 부가세 포함)에선 모델이 고르는 행이
+조건마다 달라질 수 있다. 첫 비용 측정(S1)에서 스키마 축소 후 7,386,000 → 7,900,000으로 바뀌었는데, 이미지를 대조해 보니
+지시문 우선순위("합계/공사비합계 행")엔 바뀐 값이 더 맞았다 — "기준과 같은가"로는 옳고 그름을 판정할 수 없는 지표다.
+리스크 진단에서 total_cost는 집계 행 제거 기준(parsing._remove_aggregate_items)으로만 쓰이고 판정 결과에 직접 들어가지 않는다.
+항목 금액의 정확도는 전체·공종별 금액 합계가 본다.
 
 공종별 지표는 bench 서버의 파싱 결과 캡처가 있는 측정에만 있다. 기준 쪽에 없으면 그 지표는 "판정 불가"로 둔다.
 
@@ -61,6 +68,13 @@ def _row(metric: str, base: list[float], cand: list[float], **tol) -> dict:
     return row
 
 
+def _record(metric: str, base: list[float], cand: list[float]) -> dict:
+    """판정하지 않고 값만 남기는 지표."""
+    row = _row(metric, base, cand)
+    row.update(allowed=None, ok=None)
+    return row
+
+
 def _values(sigs: list[dict], key: str) -> list[float]:
     return [s[key] for s in sigs if s.get(key) is not None]
 
@@ -74,7 +88,7 @@ def judge_case(base_sigs: list[dict], cand_sigs: list[dict]) -> list[dict]:
     rows = [
         _row("항목 수", _values(base_sigs, "line_item_count"), _values(cand_sigs, "line_item_count"), rel=ITEM_COUNT_TOL),
         _row("전체 금액 합계", _values(base_sigs, "amount_sum"), _values(cand_sigs, "amount_sum"), rel=TOTAL_TOL),
-        _row("total_cost", _values(base_sigs, "total_cost"), _values(cand_sigs, "total_cost"), rel=TOTAL_TOL),
+        _record("total_cost (기록만)", _values(base_sigs, "total_cost"), _values(cand_sigs, "total_cost")),
     ]
 
     base_cat = [s for s in base_sigs if "category_amounts" in s]
@@ -89,9 +103,7 @@ def judge_case(base_sigs: list[dict], cand_sigs: list[dict]) -> list[dict]:
             rows.append(_row(f"비중 · {c} (%)", [_shares(s).get(c, 0.0) for s in base_cat],
                              [_shares(s).get(c, 0.0) for s in cand_cat], abs_=CATEGORY_SHARE_TOL_PP))
 
-    risk = _row("리스크 이슈 수 (기록만)", _values(base_sigs, "total_risk_items"), _values(cand_sigs, "total_risk_items"))
-    risk.update(allowed=None, ok=None)
-    rows.append(risk)
+    rows.append(_record("리스크 이슈 수 (기록만)", _values(base_sigs, "total_risk_items"), _values(cand_sigs, "total_risk_items")))
     return rows
 
 

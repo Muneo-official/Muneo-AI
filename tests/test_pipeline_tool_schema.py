@@ -1,5 +1,5 @@
 from pipeline.categories import NORMALIZED_CATEGORIES
-from pipeline.tool_schema import ESTIMATE_TOOL, RISK_ESTIMATE_TOOL, TOOL_NAME
+from pipeline.tool_schema import ESTIMATE_TOOL, RISK_ESTIMATE_TOOL, RISK_FILM_CATEGORY_RULE, TOOL_NAME
 
 
 def test_tool_name_matches_constant():
@@ -24,23 +24,37 @@ def _item_properties(tool):
     return tool["input_schema"]["properties"]["line_items"]["items"]["properties"]
 
 
+def _item_required(tool):
+    return tool["input_schema"]["properties"]["line_items"]["items"]["required"]
+
+
 def test_collection_schema_keeps_all_item_fields():
     # 크롤링 수집(배치)은 가견적 코퍼스가 되므로 필드를 줄이지 않는다 — 리스크 전용 스키마를 만들며 건드리지 않았는지 고정
     assert set(_item_properties(ESTIMATE_TOOL)) == {
         "code", "category", "description", "unit_price", "quantity", "unit", "amount",
     }
+    assert _item_properties(ESTIMATE_TOOL)["code"] == {"type": "string"}
+    assert _item_required(ESTIMATE_TOOL) == ["category", "description", "amount"]
 
 
-def test_risk_schema_drops_only_unit_and_quantity():
+def test_risk_schema_drops_unit_and_quantity_requires_code_and_adds_film_rule():
     assert set(_item_properties(ESTIMATE_TOOL)) - set(_item_properties(RISK_ESTIMATE_TOOL)) == {"unit", "quantity"}
-    # 나머지(카테고리 enum·설명, 필수 필드, 도구 이름·설명, total_cost)는 수집 스키마와 같아야 한다
+    # code는 필수 + 채우는 규칙 설명 — 청크마다 code 유무가 달라 겹침 중복이 새던 문제 대응
+    assert _item_required(RISK_ESTIMATE_TOOL) == ["code", "category", "description", "amount"]
+    assert _item_properties(RISK_ESTIMATE_TOOL)["code"]["type"] == "string"
+    assert "빈 문자열" in _item_properties(RISK_ESTIMATE_TOOL)["code"]["description"]
+    # category: enum은 같고, 설명은 수집 스키마 설명 뒤에 필름 규칙만 붙는다
+    risk_category = _item_properties(RISK_ESTIMATE_TOOL)["category"]
+    collection_category = _item_properties(ESTIMATE_TOOL)["category"]
+    assert risk_category["enum"] == collection_category["enum"]
+    assert risk_category["description"] == f"{collection_category['description']} {RISK_FILM_CATEGORY_RULE}"
+    assert RISK_FILM_CATEGORY_RULE not in collection_category["description"]
+    # 나머지(description·amount·unit_price, 도구 이름·설명, total_cost)는 수집 스키마와 같아야 한다
     for field, spec in _item_properties(RISK_ESTIMATE_TOOL).items():
-        assert spec == _item_properties(ESTIMATE_TOOL)[field]
+        if field not in ("code", "category"):
+            assert spec == _item_properties(ESTIMATE_TOOL)[field]
     risk_schema = {k: v for k, v in RISK_ESTIMATE_TOOL["input_schema"]["properties"].items() if k != "line_items"}
     collection_schema = {k: v for k, v in ESTIMATE_TOOL["input_schema"]["properties"].items() if k != "line_items"}
     assert risk_schema == collection_schema
     assert RISK_ESTIMATE_TOOL["input_schema"]["required"] == ESTIMATE_TOOL["input_schema"]["required"]
-    assert RISK_ESTIMATE_TOOL["input_schema"]["properties"]["line_items"]["items"]["required"] == [
-        "category", "description", "amount",
-    ]
     assert (RISK_ESTIMATE_TOOL["name"], RISK_ESTIMATE_TOOL["description"]) == (TOOL_NAME, ESTIMATE_TOOL["description"])
