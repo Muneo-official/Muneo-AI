@@ -1,0 +1,534 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>리스크 진단 벤치마크</title>
+<style>
+:root {
+  color-scheme: light;
+  --page: #f9f9f7; --surface: #fcfcfb;
+  --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+  --grid: #e1e0d9; --axis: #c3c2b7; --border: rgba(11,11,11,0.10);
+  --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a;
+  --st1: #184f95; --st2: #3987e5; --st3: #86b6ef; --st4: #c3c2b7;
+  --good: #006300; --bad: #d03b3b;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --page: #0d0d0d; --surface: #1a1a19;
+    --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
+    --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10);
+    --s1: #3987e5; --s2: #d95926; --s3: #199e70;
+    --st1: #86b6ef; --st2: #3987e5; --st3: #1c5cab; --st4: #52514e;
+    --good: #0ca30c; --bad: #e66767;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #0d0d0d; --surface: #1a1a19;
+  --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
+  --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10);
+  --s1: #3987e5; --s2: #d95926; --s3: #199e70;
+  --st1: #86b6ef; --st2: #3987e5; --st3: #1c5cab; --st4: #52514e;
+  --good: #0ca30c; --bad: #e66767;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--page); color: var(--ink);
+  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", "Malgun Gothic", sans-serif;
+}
+main { max-width: 1100px; margin: 0 auto; padding: 24px 16px 64px; }
+h1 { font-size: 22px; margin: 0 0 4px; }
+h2 { font-size: 16px; margin: 0 0 2px; }
+.sub { color: var(--ink-2); margin: 0 0 12px; }
+.muted { color: var(--muted); font-size: 12px; }
+.card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+  padding: 16px; margin-top: 16px; overflow: hidden;
+}
+.controls { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-top: 16px; }
+select, button {
+  font: inherit; color: var(--ink); background: var(--surface);
+  border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px;
+}
+.legend { display: flex; flex-wrap: wrap; gap: 14px; margin: 8px 0; color: var(--ink-2); font-size: 12px; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.key { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+.key.line { height: 2px; border-radius: 1px; width: 14px; }
+.chart svg { display: block; width: 100%; height: auto; }
+.chart text { fill: var(--muted); font-size: 11px; }
+.chart text.lbl { fill: var(--ink-2); }
+.chart .mark { cursor: default; outline: none; }
+.chart .mark:hover, .chart .mark:focus { opacity: 0.8; }
+.multiples { display: grid; gap: 16px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+@media (max-width: 640px) { .multiples { grid-template-columns: 1fr; } }
+.multiples h3 { font-size: 13px; margin: 0 0 4px; color: var(--ink-2); font-weight: 600; }
+.table-wrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 12px; font-variant-numeric: tabular-nums; }
+th, td { text-align: right; padding: 6px 8px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+th:first-child, td:first-child, th.l, td.l { text-align: left; }
+th { color: var(--ink-2); font-weight: 600; }
+.good { color: var(--good); } .bad { color: var(--bad); }
+details summary { cursor: pointer; color: var(--ink-2); margin-top: 8px; }
+.empty { color: var(--muted); padding: 24px 0; text-align: center; }
+#tip {
+  position: fixed; pointer-events: none; z-index: 10; display: none;
+  background: var(--surface); color: var(--ink); border: 1px solid var(--border);
+  border-radius: 8px; padding: 8px 10px; font-size: 12px; box-shadow: 0 4px 16px rgba(0,0,0,0.15);
+  max-width: 280px;
+}
+#tip .v { font-weight: 700; font-size: 13px; }
+#tip .n { color: var(--ink-2); }
+</style>
+</head>
+<body>
+<main>
+  <h1>리스크 진단 응답시간·비용 벤치마크</h1>
+  <p class="sub"><code>POST /risk-detector/analyze</code> · 기록: docs/RISK_DETECTOR_PERF_COST_LOG.md</p>
+  <div class="controls">
+    <label>케이스 <select id="case-select"></select></label>
+    <button id="theme-toggle" type="button">테마 전환</button>
+  </div>
+  <div id="meta" class="card"></div>
+  <section class="card"><h2>케이스별 요약</h2>
+    <p class="muted">대표 실행 = 케이스별 wall time 중앙값인 실행. 변화율은 첫 번째 측정 대비.</p>
+    <div id="summary" class="table-wrap"></div></section>
+  <section class="card"><h2>Vision 호출 타임라인</h2>
+    <p class="muted">선택한 케이스의 대표 실행. 막대 하나 = Vision 호출 1회. 직렬이면 계단, 병렬이면 겹쳐 쌓인다. 측정 간 같은 시간축.</p>
+    <div id="legend-labels-1" class="legend"></div>
+    <div id="waterfall" class="multiples chart"></div></section>
+  <section class="card"><h2>구간별 응답시간</h2>
+    <p class="muted">대표 실행의 wall time 분해. 기타 = 업로드·네트워크·응답 직렬화 (wall − 서버 구간 합).</p>
+    <div id="legend-stages" class="legend"></div>
+    <div id="stages" class="chart"></div></section>
+  <section class="card"><h2>청크 수 대비 응답시간</h2>
+    <p class="muted">점 = 실행 1회, 선 = 청크 수별 중앙값. 직렬이면 청크 수에 비례해 오르고, 병렬화하면 평평해져야 한다.</p>
+    <div id="legend-labels-2" class="legend"></div>
+    <div id="scatter" class="chart"></div></section>
+  <section class="card"><h2>요청당 비용</h2>
+    <p class="muted" id="cost-note"></p>
+    <div id="legend-labels-3" class="legend"></div>
+    <div id="cost" class="chart"></div></section>
+  <section class="card"><h2>동시 부하 (Vision mock)</h2>
+    <p class="muted" id="load-note"></p>
+    <div id="legend-load" class="legend"></div>
+    <div id="load" class="multiples chart"></div>
+    <div id="load-table" class="table-wrap"></div></section>
+  <section class="card"><h2>정확도 비교</h2>
+    <p class="muted">같은 입력이어도 모델 출력이 실행마다 조금씩 달라서, 첫 번째 측정의 실행 간 변동 범위를 기준으로 본다. 개선 후 실행들의 중앙값이 그 범위 안이면 ✓. 범위 밖이면 원인을 따로 확인한다.</p>
+    <div id="accuracy" class="table-wrap"></div></section>
+  <section class="card"><h2>원시 데이터</h2>
+    <details><summary>모든 요청 보기</summary><div id="raw" class="table-wrap"></div></details></section>
+</main>
+<div id="tip" role="tooltip"></div>
+<script>
+const DATA = "__BENCH_DATA__";
+const LAT = DATA.latency, LOAD = DATA.load;
+const NS = "http://www.w3.org/2000/svg";
+const SERIES = ["--s1", "--s2", "--s3"];
+const STAGES = [
+  ["parse_images_s", "파싱 (Vision)", "--st1"],
+  ["rule_analyze_s", "룰 분석", "--st2"],
+  ["price_check_s", "가격 체크", "--st3"],
+  ["other_s", "기타", "--st4"],
+];
+const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const $ = (id) => document.getElementById(id);
+const fmt = (v, d = 1) => (v == null || Number.isNaN(v) ? "–" : Number(v).toFixed(d));
+const usd = (v) => (v == null ? "–" : "$" + Number(v).toFixed(4));
+const median = (a) => { if (!a.length) return NaN; const s = [...a].sort((x, y) => x - y), m = s.length >> 1; return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
+
+function el(tag, attrs = {}, parent) {
+  const e = document.createElementNS(NS, tag);
+  for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
+  if (parent) parent.appendChild(e);
+  return e;
+}
+function h(tag, text, parent, cls) {
+  const e = document.createElement(tag);
+  if (text != null) e.textContent = text;
+  if (cls) e.className = cls;
+  if (parent) parent.appendChild(e);
+  return e;
+}
+function niceMax(v) {
+  if (!(v > 0)) return 1;
+  const p = Math.pow(10, Math.floor(Math.log10(v))), n = v / p;
+  return (n <= 1 ? 1 : n <= 2 ? 2 : n <= 2.5 ? 2.5 : n <= 4 ? 4 : n <= 5 ? 5 : n <= 8 ? 8 : 10) * p;
+}
+function ticks(max, n = 5) { const step = max / n; return Array.from({ length: n + 1 }, (_, i) => i * step); }
+// 오른쪽 끝만 둥근 가로 막대 (기준선 쪽은 각지게)
+function hbarPath(x, y, w, hgt, r = 4) {
+  r = Math.min(r, w / 2, hgt / 2);
+  if (w <= 0) return "";
+  return `M${x},${y}h${w - r}a${r},${r} 0 0 1 ${r},${r}v${hgt - 2 * r}a${r},${r} 0 0 1 -${r},${r}h-${w - r}z`;
+}
+
+// ── 툴팁: 값이 먼저, 이름은 뒤 (textContent만 사용) ──
+const tip = $("tip");
+function bindTip(node, rows) {
+  node.setAttribute("tabindex", "0");
+  node.classList.add("mark");
+  const show = (x, y) => {
+    tip.replaceChildren();
+    for (const [value, name] of rows) {
+      const line = h("div", null, tip);
+      h("span", value, line, "v");
+      if (name) h("span", "  " + name, line, "n");
+    }
+    tip.style.display = "block";
+    const r = tip.getBoundingClientRect();
+    tip.style.left = Math.min(x + 12, innerWidth - r.width - 8) + "px";
+    tip.style.top = Math.max(8, y - r.height - 12) + "px";
+  };
+  node.addEventListener("pointermove", (e) => show(e.clientX, e.clientY));
+  node.addEventListener("pointerleave", () => (tip.style.display = "none"));
+  node.addEventListener("focus", () => { const b = node.getBoundingClientRect(); show(b.right, b.top); });
+  node.addEventListener("blur", () => (tip.style.display = "none"));
+}
+function legend(target, items, line = false) {
+  const box = $(target); box.replaceChildren();
+  for (const [name, color] of items) {
+    const s = h("span", null, box);
+    const k = h("i", null, s, "key" + (line ? " line" : ""));
+    k.style.background = css(color);
+    s.appendChild(document.createTextNode(name));
+  }
+}
+function axisX(svg, x0, x1, y, max, scale, unit) {
+  for (const t of ticks(max)) {
+    const x = x0 + scale(t);
+    el("line", { x1: x, x2: x, y1: 8, y2: y, stroke: css("--grid"), "stroke-width": 1 }, svg);
+    el("text", { x, y: y + 14, "text-anchor": "middle" }, svg).textContent = fmt(t, t % 1 ? 1 : 0) + unit;
+  }
+  el("line", { x1: x0, x2: x1, y1: y, y2: y, stroke: css("--axis"), "stroke-width": 1 }, svg);
+}
+
+// ── 데이터 가공 ──
+const labelColor = (i) => SERIES[i % SERIES.length];
+function runsOf(result, caseId) {
+  return result.requests.filter((r) => r.case_id === caseId && !r.warmup && r.status === 200 && r.server);
+}
+function representative(result, caseId) {
+  const runs = runsOf(result, caseId).sort((a, b) => a.wall_s - b.wall_s);
+  return runs.length ? runs[(runs.length - 1) >> 1] : null;
+}
+function stagesOf(run) {
+  const s = run.server;
+  const known = s.parse_images_s + s.rule_analyze_s + s.price_check_s;
+  return { ...s, other_s: Math.max(0, run.wall_s - known) };
+}
+const allCases = () => {
+  const seen = new Map();
+  for (const r of LAT) for (const c of r.cases) if (!seen.has(c.id)) seen.set(c.id, c);
+  return [...seen.values()].sort((a, b) => a.id.localeCompare(b.id));
+};
+
+// ── 섹션 렌더 ──
+function renderMeta() {
+  const box = $("meta"); box.replaceChildren();
+  if (!LAT.length && !LOAD.length) { h("div", "결과 파일이 없습니다.", box, "empty"); return; }
+  const t = h("table", null, h("div", null, box, "table-wrap"));
+  const hr = h("tr", null, h("thead", null, t));
+  for (const c of ["측정", "종류", "시작", "커밋", "모델 / Vision", "비고"]) h("th", c, hr, "l");
+  const tb = h("tbody", null, t);
+  for (const r of [...LAT, ...LOAD]) {
+    const tr = h("tr", null, tb);
+    const vision = r.kind === "latency" ? r.model : `${r.tool ? r.tool.split(" ")[0] + " · " : ""}mock (${r.server_info.latency_source})`;
+    const note = r.kind === "latency" ? `케이스 ${r.cases.length}개 × ${r.runs}회 · 단가 기준일 ${r.pricing_checked_at}` : `케이스 ${r.case.id} 고정 · ${r.model || "closed"} 모델`;
+    for (const v of [r.label, r.kind === "latency" ? "단건 (실제 API)" : "부하", r.started_at, r.git_commit, vision, note]) h("td", v, tr, "l");
+  }
+}
+
+function renderSummary() {
+  const box = $("summary"); box.replaceChildren();
+  if (!LAT.length) { h("div", "단건 측정 결과 없음", box, "empty"); return; }
+  const t = h("table", null, box);
+  const hr = h("tr", null, h("thead", null, t));
+  h("th", "케이스", hr); h("th", "청크", hr);
+  LAT.forEach((r, i) => { h("th", `${r.label} p50`, hr); h("th", "최대", hr); h("th", "비용", hr); if (i) h("th", "변화", hr); });
+  const tb = h("tbody", null, t);
+  for (const c of allCases()) {
+    const tr = h("tr", null, tb);
+    h("td", `${c.id} · ${c.description}`, tr); h("td", c.total_chunks, tr);
+    let base = null;
+    LAT.forEach((r, i) => {
+      const runs = runsOf(r, c.id), walls = runs.map((x) => x.wall_s);
+      const p50 = median(walls);
+      h("td", fmt(p50) + "s", tr); h("td", walls.length ? fmt(Math.max(...walls)) + "s" : "–", tr);
+      h("td", usd(median(runs.map((x) => x.cost_usd))), tr);
+      if (i === 0) base = p50;
+      else { const d = (p50 - base) / base * 100; h("td", Number.isFinite(d) ? (d > 0 ? "+" : "") + fmt(d, 0) + "%" : "–", tr, d < 0 ? "good" : d > 0 ? "bad" : ""); }
+    });
+  }
+}
+
+function renderWaterfall(caseId, width) {
+  const box = $("waterfall"); box.replaceChildren();
+  legend("legend-labels-1", [...LAT.map((r, i) => [`Vision 호출 · ${r.label}`, labelColor(i)]), ...STAGES.slice(0, 3).map(([, name, color]) => [`분석 구간 · ${name}`, color])]);
+  const reps = LAT.map((r) => representative(r, caseId));
+  if (!reps.some(Boolean)) { h("div", "이 케이스의 성공한 실행이 없습니다.", box, "empty"); return; }
+  const maxT = niceMax(Math.max(...reps.filter(Boolean).map((r) => r.wall_s)));
+  const panelW = LAT.length > 1 && width > 640 ? (width - 16) / 2 : width;
+  LAT.forEach((res, i) => {
+    const wrap = h("div", null, box);
+    const run = reps[i];
+    h("h3", run ? `${res.label} · wall ${fmt(run.wall_s)}s · Vision ${run.server.vision_calls.length}회` : `${res.label} · 실행 없음`, wrap);
+    if (!run) return;
+    const s = stagesOf(run);
+    const calls = run.server.vision_calls;
+    const rowH = 18, gap = 6, left = 76, right = 12, top = 8;
+    const rows = [["분석 구간", null], ...calls.map((c) => [`이미지${c.image_index + 1}·청크${c.chunk_index + 1}`, c])];
+    const plotH = rows.length * (rowH + gap);
+    const svg = el("svg", { viewBox: `0 0 ${panelW} ${top + plotH + 24}` }, h("div", null, wrap));
+    const scale = (v) => (v / maxT) * (panelW - left - right);
+    axisX(svg, left, panelW - right, top + plotH, maxT, scale, "s");
+    // 서버 analyze() 시작 시점 근사: 응답 직전(서버 duration 끝)에서 total_s만큼 앞
+    const analyzeStart = Math.max(0, s.server_duration_s - s.total_s);
+    let cursor = analyzeStart;
+    for (const [key, name, color] of STAGES.slice(0, 3)) {
+      const w = scale(s[key]);
+      if (w > 0.5) {
+        const p = el("rect", { x: left + scale(cursor), y: top + 4, width: Math.max(w - 2, 1), height: rowH - 8, rx: 2, fill: css(color) }, svg);
+        bindTip(p, [[fmt(s[key], 2) + "s", name]]);
+      }
+      cursor += s[key];
+    }
+    rows.forEach(([name, c], ri) => {
+      const y = top + ri * (rowH + gap);
+      el("text", { x: left - 6, y: y + rowH / 2 + 4, "text-anchor": "end", class: "lbl" }, svg).textContent = name;
+      if (!c) return;
+      const p = el("path", { d: hbarPath(left + scale(c.start_s), y, Math.max(scale(c.latency_s), 2), rowH), fill: css(labelColor(i)) }, svg);
+      bindTip(p, [[fmt(c.latency_s, 2) + "s", `시작 +${fmt(c.start_s, 2)}s`], [`${c.input_tokens.toLocaleString()} / ${c.output_tokens.toLocaleString()}`, "입력 / 출력 토큰"]]);
+    });
+  });
+}
+
+function renderStages(width) {
+  const box = $("stages"); box.replaceChildren();
+  legend("legend-stages", STAGES.map(([, name, color]) => [name, color]));
+  const bars = [];
+  for (const c of allCases()) LAT.forEach((r) => { const run = representative(r, c.id); if (run) bars.push({ c, r, run, s: stagesOf(run) }); });
+  if (!bars.length) { h("div", "단건 측정 결과 없음", box, "empty"); return; }
+  const rowH = 20, gap = 8, left = 130, right = 56, top = 8;
+  const maxT = niceMax(Math.max(...bars.map((b) => b.run.wall_s)));
+  const plotH = bars.length * (rowH + gap);
+  const svg = el("svg", { viewBox: `0 0 ${width} ${top + plotH + 24}` }, box);
+  const scale = (v) => (v / maxT) * (width - left - right);
+  axisX(svg, left, width - right, top + plotH, maxT, scale, "s");
+  bars.forEach((b, i) => {
+    const y = top + i * (rowH + gap);
+    el("text", { x: left - 6, y: y + rowH / 2 + 4, "text-anchor": "end", class: "lbl" }, svg).textContent = `${b.c.id} · ${b.r.label}`;
+    let x = left;
+    STAGES.forEach(([key, name, color], si) => {
+      const w = scale(b.s[key]);
+      if (w <= 0) return;
+      const isLast = STAGES.slice(si + 1).every(([k]) => scale(b.s[k]) <= 0);
+      const node = isLast
+        ? el("path", { d: hbarPath(x, y, Math.max(w, 1), rowH), fill: css(color) }, svg)
+        : el("rect", { x, y, width: Math.max(w - 2, 0.5), height: rowH, fill: css(color) }, svg);
+      bindTip(node, [[fmt(b.s[key], 2) + "s", name], [fmt(b.s[key] / b.run.wall_s * 100, 0) + "%", "wall 대비"]]);
+      x += w;
+    });
+    el("text", { x: x + 6, y: y + rowH / 2 + 4, class: "lbl" }, svg).textContent = fmt(b.run.wall_s) + "s";
+  });
+}
+
+function renderScatter(width) {
+  const box = $("scatter"); box.replaceChildren();
+  legend("legend-labels-2", LAT.map((r, i) => [r.label, labelColor(i)]));
+  const pts = LAT.flatMap((r, i) => r.requests.filter((q) => !q.warmup && q.status === 200 && q.server)
+    .map((q) => ({ i, r, q, x: q.server.chunk_count, y: q.wall_s })));
+  if (!pts.length) { h("div", "단건 측정 결과 없음", box, "empty"); return; }
+  const H = 260, left = 44, right = 16, top = 12, bottom = 36;
+  const maxX = Math.max(...pts.map((p) => p.x)) + 1, maxY = niceMax(Math.max(...pts.map((p) => p.y)));
+  const svg = el("svg", { viewBox: `0 0 ${width} ${H}` }, box);
+  const sx = (v) => left + (v / maxX) * (width - left - right), sy = (v) => H - bottom - (v / maxY) * (H - top - bottom);
+  for (const t of ticks(maxY)) {
+    el("line", { x1: left, x2: width - right, y1: sy(t), y2: sy(t), stroke: css("--grid") }, svg);
+    el("text", { x: left - 6, y: sy(t) + 4, "text-anchor": "end" }, svg).textContent = fmt(t, t % 1 ? 1 : 0) + "s";
+  }
+  for (let c = 0; c <= maxX; c++) el("text", { x: sx(c), y: H - bottom + 16, "text-anchor": "middle" }, svg).textContent = c;
+  el("text", { x: (left + width - right) / 2, y: H - 4, "text-anchor": "middle" }, svg).textContent = "청크 수 (Vision 호출 수)";
+  el("line", { x1: left, x2: width - right, y1: sy(0), y2: sy(0), stroke: css("--axis") }, svg);
+  LAT.forEach((r, i) => {
+    const byX = new Map();
+    pts.filter((p) => p.i === i).forEach((p) => byX.set(p.x, [...(byX.get(p.x) || []), p.y]));
+    const line = [...byX.entries()].sort((a, b) => a[0] - b[0]).map(([x, ys]) => [x, median(ys)]);
+    if (line.length > 1) el("polyline", { points: line.map(([x, y]) => `${sx(x)},${sy(y)}`).join(" "), fill: "none", stroke: css(labelColor(i)), "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round" }, svg);
+  });
+  for (const p of pts) {
+    const g = el("g", {}, svg);
+    el("circle", { cx: sx(p.x), cy: sy(p.y), r: 12, fill: "transparent" }, g);
+    el("circle", { cx: sx(p.x), cy: sy(p.y), r: 4, fill: css(labelColor(p.i)), stroke: css("--surface"), "stroke-width": 2 }, g);
+    bindTip(g, [[fmt(p.y) + "s", `${p.r.label} · ${p.q.case_id} run ${p.q.run_index + 1}`], [`${p.x}청크`, `파싱 ${fmt(p.q.server.parse_images_s)}s`]]);
+  }
+}
+
+function renderCost(width) {
+  const box = $("cost"); box.replaceChildren();
+  legend("legend-labels-3", LAT.map((r, i) => [r.label, labelColor(i)]));
+  $("cost-note").textContent = LAT.length ? `실행별 비용의 중앙값. 단가: ${[...new Set(LAT.map((r) => r.model))].join(", ")} (기준일 ${LAT[0].pricing_checked_at}). 막대에 마우스를 올리면 토큰 수.` : "";
+  const cases = allCases();
+  if (!LAT.length) { h("div", "단건 측정 결과 없음", box, "empty"); return; }
+  const rowH = 14, gap = 2, groupGap = 14, left = 130, right = 72, top = 8;
+  const groupH = LAT.length * (rowH + gap) + groupGap;
+  const vals = cases.flatMap((c) => LAT.map((r) => median(runsOf(r, c.id).map((q) => q.cost_usd)))).filter(Number.isFinite);
+  const maxV = niceMax(Math.max(...vals, 0.0001));
+  const plotH = cases.length * groupH;
+  const svg = el("svg", { viewBox: `0 0 ${width} ${top + plotH + 24}` }, box);
+  const scale = (v) => (v / maxV) * (width - left - right);
+  for (const t of ticks(maxV, 4)) {
+    const x = left + scale(t);
+    el("line", { x1: x, x2: x, y1: top, y2: top + plotH, stroke: css("--grid") }, svg);
+    el("text", { x, y: top + plotH + 14, "text-anchor": "middle" }, svg).textContent = "$" + t.toFixed(3);
+  }
+  cases.forEach((c, ci) => {
+    const gy = top + ci * groupH;
+    el("text", { x: left - 6, y: gy + (LAT.length * (rowH + gap)) / 2 + 4, "text-anchor": "end", class: "lbl" }, svg).textContent = `${c.id} (${c.total_chunks}청크)`;
+    LAT.forEach((r, i) => {
+      const runs = runsOf(r, c.id);
+      const v = median(runs.map((q) => q.cost_usd));
+      if (!Number.isFinite(v)) return;
+      const y = gy + i * (rowH + gap);
+      const p = el("path", { d: hbarPath(left, y, Math.max(scale(v), 2), rowH), fill: css(labelColor(i)) }, svg);
+      bindTip(p, [[usd(v), r.label], [`${median(runs.map((q) => q.server.input_tokens)).toLocaleString()} / ${median(runs.map((q) => q.server.output_tokens)).toLocaleString()}`, "입력 / 출력 토큰"]]);
+      el("text", { x: left + scale(v) + 6, y: y + rowH / 2 + 4, class: "lbl" }, svg).textContent = usd(v);
+    });
+  });
+}
+
+// 부하 결과 하나 = 한 부하 모델(closed: x=동시 사용자, open: x=분당 도착 건수)
+const loadX = (l) => (l.model === "open" ? l.arrival_rpm : l.concurrency);
+const loadXLabel = (model) => (model === "open" ? "분당 도착 건수" : "동시 사용자 수");
+
+function loadPanel(box, results, key, title, panelW) {
+  const wrap = h("div", null, box); h("h3", title, wrap);
+  const H = 220, left = 44, right = 16, top = 12, bottom = 36;
+  const xs = [...new Set(results.flatMap(([r]) => r.levels.map(loadX)))].sort((a, b) => a - b);
+  const maxY = niceMax(Math.max(...results.flatMap(([r]) => r.levels.map((l) => l[key] || 0))));
+  const svg = el("svg", { viewBox: `0 0 ${panelW} ${H}` }, h("div", null, wrap));
+  const sx = (v) => left + (xs.indexOf(v) / Math.max(xs.length - 1, 1)) * (panelW - left - right);
+  const sy = (v) => H - bottom - (v / maxY) * (H - top - bottom);
+  for (const t of ticks(maxY, 4)) {
+    el("line", { x1: left, x2: panelW - right, y1: sy(t), y2: sy(t), stroke: css("--grid") }, svg);
+    el("text", { x: left - 6, y: sy(t) + 4, "text-anchor": "end" }, svg).textContent = fmt(t, t % 1 ? 1 : 0) + "s";
+  }
+  xs.forEach((x) => (el("text", { x: sx(x), y: H - bottom + 16, "text-anchor": "middle" }, svg).textContent = x));
+  el("text", { x: (left + panelW - right) / 2, y: H - 4, "text-anchor": "middle" }, svg).textContent = loadXLabel(results[0][0].model);
+  for (const [r, i] of results) {
+    const pts = r.levels.filter((l) => l[key] != null);
+    el("polyline", { points: pts.map((l) => `${sx(loadX(l))},${sy(l[key])}`).join(" "), fill: "none", stroke: css(labelColor(i)), "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round" }, svg);
+    for (const l of pts) {
+      const g = el("g", {}, svg);
+      el("circle", { cx: sx(loadX(l)), cy: sy(l[key]), r: 12, fill: "transparent" }, g);
+      el("circle", { cx: sx(loadX(l)), cy: sy(l[key]), r: 4, fill: css(labelColor(i)), stroke: css("--surface"), "stroke-width": 2 }, g);
+      const server = l.server ? `서버 안쪽 p50 ${fmt(l.server.total_p50_s)}s` : "서버 로그 없음";
+      bindTip(g, [[fmt(l[key]) + "s", `${r.label} · ${loadXLabel(l.model)} ${loadX(l)}`], [`${l.throughput_rpm} req/min`, `에러 ${fmt(l.error_rate * 100, 0)}% · ${server}`]]);
+    }
+  }
+}
+
+function renderLoad(width) {
+  const box = $("load"); box.replaceChildren(); $("load-table").replaceChildren();
+  legend("legend-load", LOAD.map((r, i) => [`${r.label} (${r.case.id})`, labelColor(i)]), true);
+  if (!LOAD.length) { $("load-note").textContent = ""; h("div", "부하 테스트 결과 없음", box, "empty"); return; }
+  const tools = [...new Set(LOAD.map((r) => r.tool).filter(Boolean))].join(", ");
+  $("load-note").textContent = `${tools || "k6"} · Vision은 실측 지연 분포를 재현한 mock이라, 여기서 드러나는 병목은 서버 쪽(threadpool·CPU)이다. 서버 안쪽 p50 = 서버 로그의 analyze() 시간 — 클라이언트 p50과의 차이가 서버에 들어가기 전 대기다.`;
+  const panelW = width > 640 ? (width - 16) / 2 : width;
+  const indexed = LOAD.map((r, i) => [r, i]);
+  const closed = indexed.filter(([r]) => r.model !== "open"), open = indexed.filter(([r]) => r.model === "open");
+  if (closed.length) {
+    loadPanel(box, closed, "p50_s", "p50 응답시간 · closed (동시 사용자)", panelW);
+    loadPanel(box, closed, "p95_s", "p95 응답시간 · closed (동시 사용자)", panelW);
+  }
+  if (open.length) {
+    loadPanel(box, open, "p50_s", "p50 응답시간 · open (도착률)", panelW);
+    loadPanel(box, open, "p95_s", "p95 응답시간 · open (도착률)", panelW);
+  }
+  const t = h("table", null, $("load-table"));
+  const hr = h("tr", null, h("thead", null, t));
+  for (const c of ["측정", "모델", "부하", "요청", "성공", "p50", "p95", "최대", "서버 p50", "처리량", "에러율", "dropped", "threshold"]) h("th", c, hr);
+  const tb = h("tbody", null, t);
+  for (const r of LOAD) for (const l of r.levels) {
+    const tr = h("tr", null, tb);
+    const load = l.model === "open" ? `${l.arrival_rpm}/min 도착` : `동시 ${l.concurrency}명`;
+    for (const v of [r.label, l.model || "closed", load, l.total_requests, l.success, fmt(l.p50_s) + "s", fmt(l.p95_s) + "s", fmt(l.max_s) + "s", l.server ? fmt(l.server.total_p50_s) + "s" : "–", l.throughput_rpm + "/min", fmt(l.error_rate * 100, 0) + "%", l.dropped_iterations ?? "–"]) h("td", v, tr);
+    const ok = l.thresholds_passed;
+    h("td", ok == null ? "–" : ok ? "✓ 통과" : "✗ 실패", tr, ok == null ? "" : ok ? "good" : "bad");
+  }
+}
+
+function renderAccuracy() {
+  const box = $("accuracy"); box.replaceChildren();
+  if (!LAT.length) { h("div", "단건 측정 결과 없음", box, "empty"); return; }
+  // 실행별 값: 항목 수는 서버 로그(모든 결과 파일에 있음), 리스크 이슈 수는 실행별 signature(없으면 첫 실행 스냅샷)
+  const perRun = (r, caseId, pick) => runsOf(r, caseId).map((q) => pick(q, r)).filter((v) => v != null);
+  const items = (q) => q.server.line_item_count;
+  const risks = (q, r) => (q.signature ? q.signature.total_risk_items : null);
+  const span = (vals) => (vals.length ? `${Math.min(...vals)}~${Math.max(...vals)}` : "–");
+  const list = (vals) => (vals.length ? vals.join("·") : "–");
+  const t = h("table", null, box);
+  const hr = h("tr", null, h("thead", null, t));
+  h("th", "케이스", hr);
+  LAT.forEach((r, i) => { h("th", `${r.label} 항목 수`, hr); h("th", "리스크 이슈 수", hr); if (i) h("th", "판정 (항목 수)", hr); });
+  const tb = h("tbody", null, t);
+  for (const c of allCases()) {
+    const tr = h("tr", null, tb); h("td", c.id, tr);
+    const baseItems = perRun(LAT[0], c.id, items);
+    LAT.forEach((r, i) => {
+      const it = perRun(r, c.id, items);
+      let rk = perRun(r, c.id, risks);
+      if (!rk.length && r.snapshots && r.snapshots[c.id]) rk = [r.snapshots[c.id].total_risk_items];
+      h("td", list(it), tr); h("td", list(rk), tr);
+      if (i) {
+        if (!it.length || !baseItems.length) { h("td", "–", tr); return; }
+        const m = median(it), lo = Math.min(...baseItems), hi = Math.max(...baseItems);
+        const inRange = m >= lo && m <= hi;
+        h("td", inRange ? `✓ 범위 안 (${span(baseItems)})` : `△ 범위 밖 (${span(baseItems)})`, tr, inRange ? "good" : "bad");
+      }
+    });
+  }
+}
+
+function renderRaw() {
+  const box = $("raw"); box.replaceChildren();
+  const t = h("table", null, box);
+  const hr = h("tr", null, h("thead", null, t));
+  for (const c of ["측정", "케이스", "실행", "상태", "wall", "파싱", "룰", "가격", "Σvision", "청크", "입력 토큰", "출력 토큰", "비용", "request_id"]) h("th", c, hr);
+  const tb = h("tbody", null, t);
+  for (const r of LAT) for (const q of r.requests) {
+    const s = q.server || {};
+    const tr = h("tr", null, tb);
+    for (const v of [r.label, q.case_id, q.warmup ? "워밍업" : q.run_index + 1, q.status ?? "ERR", fmt(q.wall_s), fmt(s.parse_images_s), fmt(s.rule_analyze_s, 2), fmt(s.price_check_s, 2), fmt(s.vision_latency_sum_s), s.chunk_count ?? "–", s.input_tokens?.toLocaleString() ?? "–", s.output_tokens?.toLocaleString() ?? "–", usd(q.cost_usd), q.request_id ?? "–"]) h("td", v, tr);
+  }
+}
+
+// ── 초기화 ──
+const select = $("case-select");
+for (const c of allCases()) { const o = h("option", `${c.id} · ${c.description} (${c.total_chunks}청크)`, select); o.value = c.id; }
+const savedCase = (() => { try { return localStorage.getItem("bench-case"); } catch { return null; } })();
+if (savedCase && [...select.options].some((o) => o.value === savedCase)) select.value = savedCase;
+else if (select.options.length) select.value = select.options[select.options.length - 1].value;
+
+function renderAll() {
+  const width = Math.max(300, $("stages").clientWidth || 900);
+  renderMeta(); renderSummary();
+  renderWaterfall(select.value, $("waterfall").clientWidth || width);
+  renderStages(width); renderScatter(width); renderCost(width);
+  renderLoad($("load").clientWidth || width); renderAccuracy(); renderRaw();
+}
+select.addEventListener("change", () => { try { localStorage.setItem("bench-case", select.value); } catch {} renderAll(); });
+$("theme-toggle").addEventListener("click", () => {
+  const dark = getComputedStyle(document.documentElement).getPropertyValue("--surface").trim() === "#1a1a19";
+  document.documentElement.setAttribute("data-theme", dark ? "light" : "dark");
+  renderAll();
+});
+let resizeTimer;
+addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(renderAll, 150); });
+renderAll();
+</script>
+</body>
+</html>

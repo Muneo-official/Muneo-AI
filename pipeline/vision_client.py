@@ -10,6 +10,8 @@ Anthropic API를 실제로 호출하는 모듈이라 API 키 없이는 단위테
 
 import base64
 import os
+import time
+from dataclasses import dataclass
 
 import anthropic
 
@@ -22,22 +24,38 @@ MODEL = "claude-sonnet-4-6"
 MAX_TOKENS = 8192
 
 _client: anthropic.Anthropic | None = None
+_async_client: anthropic.AsyncAnthropic | None = None
 
 
-def get_client() -> anthropic.Anthropic:
-    """지연 초기화 — 이 모듈을 import하는 것만으로 ANTHROPIC_API_KEY를 요구하지 않는다.
-
-    identity-linked API 키(여러 workspace에 걸친 조직 계정 키)는 어느 workspace로
+def _default_headers() -> dict | None:
+    """identity-linked API 키(여러 workspace에 걸친 조직 계정 키)는 어느 workspace로
     요청을 실행할지 anthropic-workspace-id 헤더로 명시해야 한다 — 특히 Batches API에서
     "anthropic-workspace-id is required..." 400 에러로 드러난다. .env에
     ANTHROPIC_WORKSPACE_ID가 있으면 자동으로 헤더에 실어 보낸다.
     """
+    workspace_id = os.environ.get("ANTHROPIC_WORKSPACE_ID")
+    return {"anthropic-workspace-id": workspace_id} if workspace_id else None
+
+
+def get_client() -> anthropic.Anthropic:
+    """지연 초기화 — 이 모듈을 import하는 것만으로 ANTHROPIC_API_KEY를 요구하지 않는다."""
     global _client
     if _client is None:
-        workspace_id = os.environ.get("ANTHROPIC_WORKSPACE_ID")
-        default_headers = {"anthropic-workspace-id": workspace_id} if workspace_id else None
-        _client = anthropic.Anthropic(default_headers=default_headers)
+        _client = anthropic.Anthropic(default_headers=_default_headers())
     return _client
+
+
+def get_async_client() -> anthropic.AsyncAnthropic:
+    """실시간 경로(risk_detector)용 비동기 클라이언트 — 청크 호출을 동시에 보내도 스레드를 점유하지 않는다.
+
+    동기 클라이언트를 run_in_threadpool로 병렬화하면 호출 하나가 응답(수십 초)까지 스레드 하나를
+    붙잡아서, 동시 요청 × 청크 수가 기본 threadpool(40)을 금방 넘는다
+    (docs/RISK_DETECTOR_PERF_COST_LOG.md 베이스라인 섹션).
+    """
+    global _async_client
+    if _async_client is None:
+        _async_client = anthropic.AsyncAnthropic(default_headers=_default_headers())
+    return _async_client
 
 
 def build_api_params(image_bytes: bytes) -> dict:
@@ -89,14 +107,64 @@ def build_pdf_api_params(pdf_bytes: bytes) -> dict:
     }
 
 
-def call_vision_api(image_bytes: bytes, client: anthropic.Anthropic | None = None) -> dict:
-    """청크(또는 이미지) 하나를 파싱. tool_use 블록의 input을 그대로 반환한다."""
-    client = client or get_client()
-    response = client.messages.create(**build_api_params(image_bytes))
+@dataclass
+class VisionCallResult:
+    """Vision 호출 1회의 파싱 결과 + 소요시간·토큰 사용량.
+
+    실시간 경로(risk_detector)의 응답시간·비용을 계측하려고 분리했다
+    (docs/RISK_DETECTOR_PERF_COST_LOG.md). 로깅은 호출자가 한다 — pipeline이
+    app.core.logging에 의존하지 않도록.
+    """
+
+    result: dict
+    latency_s: float
+    input_tokens: int
+    output_tokens: int
+    cache_creation_input_tokens: int
+    cache_read_input_tokens: int
+
+
+def _to_call_result(response, latency_s: float) -> VisionCallResult:
+    result = {"is_estimate": False}
     for block in response.content:
         if block.type == "tool_use":
-            return block.input
-    return {"is_estimate": False}
+            result = block.input
+            break
+
+    usage = response.usage
+    return VisionCallResult(
+        result=result,
+        latency_s=latency_s,
+        input_tokens=usage.input_tokens,
+        output_tokens=usage.output_tokens,
+        cache_creation_input_tokens=getattr(usage, "cache_creation_input_tokens", None) or 0,
+        cache_read_input_tokens=getattr(usage, "cache_read_input_tokens", None) or 0,
+    )
+
+
+def call_vision_api_with_usage(
+    image_bytes: bytes, client: anthropic.Anthropic | None = None
+) -> VisionCallResult:
+    """call_vision_api()와 같은 파싱을 하되, 소요시간과 response.usage를 같이 반환한다."""
+    client = client or get_client()
+    started = time.perf_counter()
+    response = client.messages.create(**build_api_params(image_bytes))
+    return _to_call_result(response, time.perf_counter() - started)
+
+
+async def acall_vision_api_with_usage(
+    image_bytes: bytes, client: anthropic.AsyncAnthropic | None = None
+) -> VisionCallResult:
+    """call_vision_api_with_usage()의 비동기 버전 — 요청 파라미터와 결과 형태는 동일하다."""
+    client = client or get_async_client()
+    started = time.perf_counter()
+    response = await client.messages.create(**build_api_params(image_bytes))
+    return _to_call_result(response, time.perf_counter() - started)
+
+
+def call_vision_api(image_bytes: bytes, client: anthropic.Anthropic | None = None) -> dict:
+    """청크(또는 이미지) 하나를 파싱. tool_use 블록의 input을 그대로 반환한다."""
+    return call_vision_api_with_usage(image_bytes, client).result
 
 
 def parse_image(image_path: str, client: anthropic.Anthropic | None = None) -> dict:
