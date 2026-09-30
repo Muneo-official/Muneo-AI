@@ -157,6 +157,9 @@ def build_server_record(events: list[dict]) -> dict | None:
         "image_count", "chunk_count", "line_item_count", "parse_images_s", "vision_latency_sum_s",
         "rule_analyze_s", "price_check_s", "total_s", "input_tokens", "output_tokens",
         "cache_creation_input_tokens", "cache_read_input_tokens",
+        # 이미지 파싱 캐시 (캐시 도입 전 로그엔 없어서 None)
+        "parse_cache_hits", "parse_cache_misses", "parse_cache_saved_input_tokens",
+        "parse_cache_saved_output_tokens", "parse_cache_lookup_s", "parse_cache_store_s",
     )
     return {
         "server_duration_s": round(http["duration_ms"] / 1000, 3),

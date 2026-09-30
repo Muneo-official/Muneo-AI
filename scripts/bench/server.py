@@ -17,9 +17,13 @@ mock 모드(--mock-vision): Anthropic 클라이언트만 가짜로 바꾼다. �
 --risk-schema full: 리스크 진단이 축소 스키마(RISK_ESTIMATE_TOOL) 대신 수집용 전체 스키마를 보내게 한다.
 스키마 축소 전후를 같은 코드에서 번갈아 재려는 것 — 기준 측정을 위해 코드를 되돌릴 필요가 없다.
 
+--parse-cache: 이미지 파싱 캐시(risk_parse_cache)를 켠다. 기본은 꺼짐 — 켜두면 같은 이미지 반복 측정의
+2회차부터 Vision을 안 불러 측정이 틀어진다. 캐시 히트 자체를 잴 때만 켠다(real 모드 전용, .env의 Mongo에 저장됨).
+
 사용법:
   python -m scripts.bench.server                                   # real
   python -m scripts.bench.server --risk-schema full                # real, 축소 전 스키마(기준 측정용)
+  python -m scripts.bench.server --parse-cache                     # real, 파싱 캐시 켬(캐시 히트 측정용)
   python -m scripts.bench.server --mock-vision logs/bench/latency_baseline_*.json
   python -m scripts.bench.server --mock-vision-fixed 20            # 실측 전, 고정 20초
 """
@@ -38,6 +42,7 @@ from types import SimpleNamespace
 import uvicorn
 from fastapi import HTTPException
 
+from app.core.config import get_settings
 from app.core.logging import get_request_id
 from app.core.rate_limit import limiter
 from app.domain.risk_analyzer import RiskAnalyzer
@@ -153,7 +158,20 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--risk-schema", choices=("risk", "full"), default="risk",
                         help="리스크 진단 출력 스키마: risk=축소(운영과 같음), full=수집용 전체(축소 전 기준 측정용)")
+    parser.add_argument("--parse-cache", action="store_true",
+                        help="이미지 파싱 캐시를 켠다(운영과 같음). 기본은 꺼짐 — 같은 이미지로 반복 측정하면 2회차부터 "
+                             "Vision을 안 불러서 지연·비용·정확도 측정이 틀어지기 때문")
     args = parser.parse_args()
+    if args.parse_cache and args.risk_schema == "full":
+        # 캐시 키의 파싱 버전은 운영 스키마 기준이라, full로 바꿔도 키가 같아 축소 스키마 결과가 섞인다
+        parser.error("--parse-cache는 --risk-schema full과 같이 쓸 수 없습니다")
+    if args.parse_cache and (args.mock_vision or args.mock_vision_fixed is not None):
+        # mock의 고정 파싱 결과가 실제 이미지 해시 키로 Mongo 캐시에 저장되면, 이후 운영에서 그 가짜 결과가 나간다
+        parser.error("--parse-cache는 mock 모드와 같이 쓸 수 없습니다")
+
+    # lifespan(app.core.deps)이 서버 시작 시 설정을 읽으므로 그 전에 환경변수로 덮는다 (.env보다 우선)
+    os.environ["RISK_PARSE_CACHE_ENABLED"] = "true" if args.parse_cache else "false"
+    get_settings.cache_clear()
 
     limiter.enabled = False
     if args.risk_schema == "full":
@@ -168,7 +186,8 @@ def main() -> None:
         mode = {"vision": "mock", "latency_source": f"fixed {args.mock_vision_fixed}s", "latency_samples": 1}
     else:
         _install_capture()
-        mode = {"vision": "real", "model": MODEL, "capture": True, "risk_schema": args.risk_schema}
+        mode = {"vision": "real", "model": MODEL, "capture": True, "risk_schema": args.risk_schema,
+                "parse_cache": args.parse_cache}
 
     @app.get("/bench/info")
     async def bench_info() -> dict:
