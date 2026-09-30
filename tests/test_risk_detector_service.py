@@ -201,7 +201,7 @@ async def test_parse_images_calls_chunks_concurrently(monkeypatch):
     service = RiskDetectorService(engine=_mock_engine())
 
     started = time.perf_counter()
-    items, calls = await service._parse_images([b"p1", b"p2"])
+    items, calls, _ = await service._parse_images([b"p1", b"p2"])
     elapsed = time.perf_counter() - started
 
     assert peak == 4  # 이미지 2장 × 청크 2개가 한꺼번에
@@ -222,7 +222,7 @@ async def test_parse_images_keeps_image_and_chunk_order_regardless_of_completion
     monkeypatch.setattr(service_module, "acall_vision_api_with_usage", fake)
     service = RiskDetectorService(engine=_mock_engine())
 
-    items, _ = await service._parse_images([b"p1", b"p2"])
+    items, _, _ = await service._parse_images([b"p1", b"p2"])
 
     assert [i["description"] for i in items] == ["p1-a", "p1-b", "p2-a", "p2-b"]
 
@@ -303,3 +303,284 @@ async def test_parse_images_caps_calls_per_request_so_one_request_cannot_take_al
 
     assert peak[b"big"] == 3
     assert small_started_at - started < 0.05  # 큰 요청이 끝나길 기다리지 않고 바로 시작
+
+
+# ── 도구 미호출 재시도 ────────────────────────────────────────────────────────
+
+
+def _no_tool(stop_reason="end_turn", input_tokens=500, output_tokens=50):
+    call = _call_result({"is_estimate": False}, input_tokens=input_tokens, output_tokens=output_tokens)
+    call.tool_called = False
+    call.stop_reason = stop_reason
+    return call
+
+
+@pytest.mark.asyncio
+async def test_retries_once_when_model_answers_without_tool(monkeypatch):
+    responses = [_no_tool(), _call_result(_ONE_ITEM_RESULT, input_tokens=1000, output_tokens=200)]
+    calls = []
+
+    async def fake(chunk, client):
+        calls.append(chunk)
+        return responses.pop(0)
+
+    monkeypatch.setattr(service_module, "acall_vision_api_with_usage", fake)
+    events: list[tuple[str, dict]] = []
+    monkeypatch.setattr(service_module, "log_event", lambda event, **fields: events.append((event, fields)))
+    service = RiskDetectorService(engine=_mock_engine())
+
+    items, vision_calls, _ = await service._parse_images([b"x"])
+
+    assert len(calls) == 2
+    assert [i["description"] for i in items] == ["실크벽지 시공"]  # 재시도 결과를 쓴다
+    assert vision_calls[0].input_tokens == 1500  # 두 호출 모두 과금되므로 합산
+    [logged] = [f for e, f in events if e == "risk_vision_call"]
+    assert logged["retried"] is True and logged["tool_called"] is True
+
+
+@pytest.mark.asyncio
+async def test_does_not_retry_refusal_truncation_or_successful_calls(monkeypatch):
+    # 거부는 다시 보내도 또 거부, 출력 한도로 잘린 건 같은 요청이면 또 잘림, 정상 호출은 재시도 불필요
+    for first in (_no_tool(stop_reason="refusal"), _no_tool(stop_reason="max_tokens"), _call_result(_ONE_ITEM_RESULT)):
+        calls: list[bytes] = []
+
+        async def once(chunk, client, first=first):
+            calls.append(chunk)
+            return first
+        monkeypatch.setattr(service_module, "acall_vision_api_with_usage", once)
+        service = RiskDetectorService(engine=_mock_engine())
+
+        await service._parse_images([b"x"])
+
+        assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_image_with_a_chunk_that_never_called_tool_is_not_cached(monkeypatch):
+    # 3청크 중 1개가 재시도까지 글로 답하면, 나머지 청크 항목만으로 결과가 비어 있지 않아도 캐시하지 않는다
+    monkeypatch.setattr(service_module, "prepare_chunks_from_bytes", lambda raw: [b"c1", b"bad", b"c3"])
+
+    async def fake(chunk, client):
+        if chunk == b"bad":
+            return _no_tool()
+        return _call_result({"is_estimate": True, "line_items": [_item(chunk.decode())]})
+
+    monkeypatch.setattr(service_module, "acall_vision_api_with_usage", fake)
+    cache = _FakeParseCache()
+    service = RiskDetectorService(engine=_mock_engine(), parse_cache=cache)
+
+    items, _, _ = await service._parse_images([b"x"])
+
+    assert [i["description"] for i in items] == ["c1", "c3"]  # 이번 응답은 나머지 청크로 나가되
+    assert cache.store == {}  # 불완전한 결과가 재업로드마다 고정되지 않게
+
+
+@pytest.mark.asyncio
+async def test_image_is_cached_when_retry_recovers(monkeypatch):
+    responses = [_no_tool(), _call_result(_ONE_ITEM_RESULT)]
+
+    async def fake(chunk, client):
+        return responses.pop(0)
+
+    monkeypatch.setattr(service_module, "acall_vision_api_with_usage", fake)
+    cache = _FakeParseCache()
+    service = RiskDetectorService(engine=_mock_engine(), parse_cache=cache)
+
+    await service._parse_images([b"x"])
+
+    assert len(cache.store) == 1
+
+
+# ── 이미지 파싱 캐시 ──────────────────────────────────────────────────────────
+
+
+class _FakeParseCache:
+    """RiskParseCacheRepository 대체 — Mongo 없이 get_many/put 동작만 흉내 낸다 (리포지토리 자체는 별도 테스트)."""
+
+    def __init__(self, fail_on: str | None = None):
+        self.store: dict = {}
+        self.fail_on = fail_on
+
+    async def get_many(self, keys):
+        if self.fail_on == "get":
+            raise RuntimeError("mongo down")
+        return {k: self.store[k] for k in keys if k in self.store}
+
+    async def put(self, key, parsed):
+        if self.fail_on == "put":
+            raise RuntimeError("mongo down")
+        self.store.setdefault(key, parsed)
+
+
+def _counting_vision(result: dict, **usage):
+    calls: list[bytes] = []
+
+    async def fake(chunk, client):
+        calls.append(chunk)
+        return _call_result(result, **usage)
+
+    return fake, calls
+
+
+@pytest.mark.asyncio
+async def test_same_image_twice_calls_vision_once_and_returns_identical_result(monkeypatch):
+    fake, calls = _counting_vision(_ONE_ITEM_RESULT)
+    monkeypatch.setattr(service_module, "acall_vision_api_with_usage", fake)
+    service = RiskDetectorService(engine=_mock_engine(), parse_cache=_FakeParseCache())
+
+    first = await service.analyze(_command())
+    second = await service.analyze(_command())
+
+    assert len(calls) == 1
+    assert first == second
+
+
+@pytest.mark.asyncio
+async def test_cache_hit_still_reruns_rules_with_new_form_input(monkeypatch):
+    # 캐시는 파싱 결과만 — 층수가 바뀌면 고층 양중비 이슈는 새로 판정돼야 한다
+    fake, calls = _counting_vision(_ONE_ITEM_RESULT)
+    monkeypatch.setattr(service_module, "acall_vision_api_with_usage", fake)
+    service = RiskDetectorService(engine=_mock_engine(), parse_cache=_FakeParseCache())
+
+    low = await service.analyze(_command(floor=2))
+    high = await service.analyze(_command(floor=15))
+
+    assert len(calls) == 1
+    assert high["report"]["summary"]["total_risk_items"] == low["report"]["summary"]["total_risk_items"] + 1
+
+
+@pytest.mark.asyncio
+async def test_partial_hit_parses_only_uncached_images_and_keeps_upload_order(monkeypatch):
+    called: list[bytes] = []
+
+    async def fake(chunk, client):
+        called.append(chunk)
+        return _call_result({"is_estimate": True, "line_items": [_item(chunk.decode())]})
+
+    monkeypatch.setattr(service_module, "acall_vision_api_with_usage", fake)
+    service = RiskDetectorService(engine=_mock_engine(), parse_cache=_FakeParseCache())
+    await service._parse_images([b"p2"])  # p2만 캐시에 올려둔다
+    called.clear()
+
+    items, calls, log = await service._parse_images([b"p1", b"p2", b"p3"])
+
+    assert sorted(called) == [b"p1", b"p3"]
+    assert [i["description"] for i in items] == ["p1", "p2", "p3"]
+    assert len(calls) == 2
+    assert log["parse_cache_hits"] == 1
+    assert log["parse_cache_misses"] == 2
+
+
+@pytest.mark.asyncio
+async def test_duplicate_image_in_one_request_is_parsed_once(monkeypatch):
+    fake, calls = _counting_vision(_ONE_ITEM_RESULT)
+    monkeypatch.setattr(service_module, "acall_vision_api_with_usage", fake)
+    service = RiskDetectorService(engine=_mock_engine(), parse_cache=_FakeParseCache())
+
+    items, _, _ = await service._parse_images([b"same", b"same"])
+
+    assert len(calls) == 1
+    assert len(items) == 1  # 이미지 간 중복 제거는 그대로
+
+
+@pytest.mark.asyncio
+async def test_empty_parse_result_is_not_cached(monkeypatch):
+    fake, calls = _counting_vision({"is_estimate": False})
+    monkeypatch.setattr(service_module, "acall_vision_api_with_usage", fake)
+    cache = _FakeParseCache()
+    service = RiskDetectorService(engine=_mock_engine(), parse_cache=cache)
+
+    await service.analyze(_command())
+    await service.analyze(_command())
+
+    assert cache.store == {}
+    assert len(calls) == 2  # 일시적 실패일 수 있으니 다시 올리면 다시 파싱
+
+
+@pytest.mark.asyncio
+async def test_nothing_cached_when_vision_call_fails(monkeypatch):
+    monkeypatch.setattr(service_module, "prepare_chunks_from_bytes", lambda raw: [b"ok", b"boom"])
+
+    async def fake(chunk, client):
+        if chunk == b"boom":
+            raise RuntimeError("vision failed")
+        return _call_result(_ONE_ITEM_RESULT)
+
+    monkeypatch.setattr(service_module, "acall_vision_api_with_usage", fake)
+    cache = _FakeParseCache()
+    service = RiskDetectorService(engine=_mock_engine(), parse_cache=cache)
+
+    with pytest.raises(RuntimeError):
+        await service._parse_images([b"x"])
+    assert cache.store == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fail_on", ["get", "put"])
+async def test_cache_failure_falls_back_to_vision(monkeypatch, fail_on):
+    fake, calls = _counting_vision(_ONE_ITEM_RESULT)
+    monkeypatch.setattr(service_module, "acall_vision_api_with_usage", fake)
+    events: list[tuple[str, dict]] = []
+    monkeypatch.setattr(service_module, "log_event", lambda event, **fields: events.append((event, fields)))
+    service = RiskDetectorService(engine=_mock_engine(), parse_cache=_FakeParseCache(fail_on=fail_on))
+
+    result = await service.analyze(_command())
+
+    assert len(calls) == 1
+    assert "도배" in [s["process"] for s in result["report"]["process_sections"]]
+    [error] = [f for e, f in events if e == "risk_parse_cache_error"]
+    assert error["op"] == fail_on
+
+
+@pytest.mark.asyncio
+async def test_parse_version_change_invalidates_cache(monkeypatch):
+    fake, calls = _counting_vision(_ONE_ITEM_RESULT)
+    monkeypatch.setattr(service_module, "acall_vision_api_with_usage", fake)
+    service = RiskDetectorService(engine=_mock_engine(), parse_cache=_FakeParseCache())
+
+    await service.analyze(_command())
+    monkeypatch.setattr(service_module, "RISK_PARSE_VERSION", "schema-changed")
+    await service.analyze(_command())
+
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_timing_log_reports_cache_hits_and_saved_tokens(monkeypatch):
+    monkeypatch.setattr(
+        service_module,
+        "acall_vision_api_with_usage",
+        _vision_returning(_ONE_ITEM_RESULT, input_tokens=1000, output_tokens=200),
+    )
+    monkeypatch.setattr(service_module, "prepare_chunks_from_bytes", lambda raw: [raw + b"-a", raw + b"-b"])
+    events: list[tuple[str, dict]] = []
+    monkeypatch.setattr(service_module, "log_event", lambda event, **fields: events.append((event, fields)))
+    service = RiskDetectorService(engine=_mock_engine(), parse_cache=_FakeParseCache())
+
+    await service.analyze(_command())
+    await service.analyze(_command())
+
+    first, second = [f for e, f in events if e == "risk_analyze_timing"]
+    assert (first["parse_cache_hits"], first["parse_cache_misses"]) == (0, 1)
+    assert (second["parse_cache_hits"], second["parse_cache_misses"]) == (1, 0)
+    assert second["chunk_count"] == 0  # 실제 Vision 호출 수
+    assert second["input_tokens"] == 0
+    assert second["parse_cache_saved_input_tokens"] == 2000  # 청크 2개 × 1000
+    assert second["parse_cache_saved_output_tokens"] == 400
+    assert first["image_sha256"] == second["image_sha256"]
+    assert len(first["image_sha256"][0]) == 64
+    assert first["parse_cache_lookup_s"] >= 0 and first["parse_cache_store_s"] >= 0
+
+
+@pytest.mark.asyncio
+async def test_hashes_are_logged_even_without_cache(monkeypatch):
+    monkeypatch.setattr(service_module, "acall_vision_api_with_usage", _vision_returning(_ONE_ITEM_RESULT))
+    events: list[tuple[str, dict]] = []
+    monkeypatch.setattr(service_module, "log_event", lambda event, **fields: events.append((event, fields)))
+    service = RiskDetectorService(engine=_mock_engine())  # parse_cache=None
+
+    await service.analyze(_command(image_files=[b"a", b"b"]))
+
+    [timing] = [f for e, f in events if e == "risk_analyze_timing"]
+    assert len(timing["image_sha256"]) == 2
+    assert timing["parse_cache_hits"] == 0

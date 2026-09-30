@@ -5,26 +5,36 @@
 여기서는 응답 헤더 X-Request-Id로 그 로그를 요청 단위로 다시 묶는다.
 """
 
+import base64
+import hashlib
 import json
 import math
 import pathlib
 import subprocess
+from collections import defaultdict
 from datetime import datetime
 
 from PIL import Image
 
-from pipeline.image_prep import MAX_PARSE_WIDTH, SPLIT_HEIGHT_THRESHOLD, split_vertically
+from pipeline.image_prep import (
+    MAX_PARSE_WIDTH,
+    SPLIT_HEIGHT_THRESHOLD,
+    prepare_chunks_from_bytes,
+    split_vertically,
+)
+from pipeline.parsing import _safe_int
 
 BENCH_DIR = pathlib.Path("logs/bench")  # logs/는 gitignore — 크롤링 데이터 경로·파싱 결과가 섞여서
 DEFAULT_CASES_FILE = BENCH_DIR / "cases.json"
 DEFAULT_LOG_FILE = pathlib.Path("logs/app.log")
 
-# USD / 1M tokens, Anthropic 1st-party 단가 (claude-api 스킬 모델표 캐시 2026-06-24, 2026-09-27 조회).
+# USD / 1M tokens, Anthropic 1st-party 단가 (claude-api 스킬 모델표 캐시 2026-09-25, 2026-09-30 조회).
 # input_tokens는 캐시되지 않은 입력만 센다 — 캐시 쓰기/읽기는 별도 필드로 따로 과금된다.
-PRICING_CHECKED_AT = "2026-09-27"
+PRICING_CHECKED_AT = "2026-09-30"
 PRICING_PER_MTOK = {
     "claude-sonnet-4-6": {"input": 3.0, "output": 15.0},
     "claude-sonnet-5": {"input": 2.0, "output": 10.0},
+    "claude-sonnet-5-5": {"input": 2.0, "output": 10.0},
     "claude-haiku-4-5": {"input": 1.0, "output": 5.0},
 }
 CACHE_WRITE_MULTIPLIER = 1.25  # 5분 TTL 기준
@@ -141,6 +151,9 @@ def build_server_record(events: list[dict]) -> dict | None:
             "output_tokens": e["output_tokens"],
             "cache_creation_input_tokens": e.get("cache_creation_input_tokens", 0),
             "cache_read_input_tokens": e.get("cache_read_input_tokens", 0),
+            "tool_called": e.get("tool_called", True),  # 필드 도입 전 로그는 강제 도구 호출이라 항상 호출됨
+            # 첫 호출이 도구 대신 글로 답해 재시도한 경우 — tool_called는 재시도 결과라 이게 없으면 첫 실패가 안 보인다
+            "retried": e.get("retried", False),
         })
     calls.sort(key=lambda c: (c["image_index"], c["chunk_index"]))
 
@@ -148,6 +161,9 @@ def build_server_record(events: list[dict]) -> dict | None:
         "image_count", "chunk_count", "line_item_count", "parse_images_s", "vision_latency_sum_s",
         "rule_analyze_s", "price_check_s", "total_s", "input_tokens", "output_tokens",
         "cache_creation_input_tokens", "cache_read_input_tokens",
+        # 이미지 파싱 캐시 (캐시 도입 전 로그엔 없어서 None)
+        "parse_cache_hits", "parse_cache_misses", "parse_cache_saved_input_tokens",
+        "parse_cache_saved_output_tokens", "parse_cache_lookup_s", "parse_cache_store_s",
     )
     return {
         "server_duration_s": round(http["duration_ms"] / 1000, 3),
@@ -173,6 +189,81 @@ def result_signature(response_json: dict) -> dict:
         "chips": report["summary"]["chips"],
         "normal_item_count": normal_count,
         "issues": [list(i) for i in issues],
+    }
+
+
+# ── 파싱 결과 캡처 (비용 작업, docs/RISK_DETECTOR_COST_LOG.md) ──
+# 출력 스키마를 줄이면 모델 출력 자체가 바뀐다. 응답 JSON엔 공종별 금액이 없어서, bench 서버(real 모드)가
+# 청크별 원본 모델 출력과 룰 분석에 들어간 최종 항목을 request_id별로 모아 두고 bench_latency가 가져간다.
+# 청크는 이미지 데이터 해시로 식별한다 — 병렬 호출이라 도착 순서로는 (이미지, 청크)를 알 수 없다.
+
+
+def chunk_digest(image_b64: str) -> str:
+    return hashlib.sha256(image_b64.encode("ascii")).hexdigest()[:16]
+
+
+def params_image_digest(params: dict) -> str | None:
+    """messages.create 파라미터에서 첫 이미지 블록의 해시. 프롬프트 순서가 바뀌어도 찾도록 타입으로 찾는다."""
+    for message in params.get("messages", []):
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if block.get("type") == "image":
+                return chunk_digest(block["source"]["data"])
+    return None
+
+
+def case_chunk_digests(case: dict) -> dict[str, list[tuple[int, int]]]:
+    """케이스 이미지를 서버와 같은 전처리로 청크 분할해 해시 → [(이미지, 청크)] 로 만든다."""
+    index: dict[str, list[tuple[int, int]]] = defaultdict(list)
+    for image_index, path in enumerate(case["images"]):
+        chunks = prepare_chunks_from_bytes(pathlib.Path(path).read_bytes())
+        for chunk_index, chunk in enumerate(chunks):
+            index[chunk_digest(base64.standard_b64encode(chunk).decode("ascii"))].append((image_index, chunk_index))
+    return dict(index)
+
+
+def assign_chunk_indices(calls: list[dict], digests: dict[str, list[tuple[int, int]]]) -> tuple[list[dict], int]:
+    """캡처된 호출에 (이미지, 청크) 인덱스를 붙여 그 순서로 정렬한다. 반환: (정렬된 호출, 매칭 실패 수).
+
+    같은 청크가 두 번 나오면(같은 이미지를 두 장 올린 경우) 앞 인덱스부터 차례로 배정한다.
+    """
+    remaining = {k: list(v) for k, v in digests.items()}
+    assigned, unmatched = [], 0
+    for call in calls:
+        slots = remaining.get(call.get("chunk_digest"))
+        if not slots:
+            unmatched += 1
+            continue
+        image_index, chunk_index = slots.pop(0)
+        assigned.append({"image_index": image_index, "chunk_index": chunk_index, **call})
+    assigned.sort(key=lambda c: (c["image_index"], c["chunk_index"]))
+    return assigned, unmatched
+
+
+def parse_metrics(line_items: list[dict], vision_calls: list[dict]) -> dict:
+    """정확도 비교 지표 — 항목 수, 전체·공종별 금액 합계, total_cost.
+
+    공종별 금액은 가격 체크(risk_price_checker._sum_amount_by_category)의 입력과 같은 방식으로 합산한다.
+    total_cost는 병합 로직(merge_chunk_results)처럼 이미지마다 청크 중 최댓값을 잡아 이미지끼리 더한다.
+    """
+    by_category: dict[str, int] = defaultdict(int)
+    for item in line_items:
+        if item.get("category") and item.get("amount"):
+            by_category[item["category"]] += _safe_int(item["amount"])
+    per_image_total: dict[int, int] = defaultdict(int)
+    for call in vision_calls:
+        output = call.get("output") or {}
+        if output.get("is_estimate"):
+            per_image_total[call["image_index"]] = max(
+                per_image_total[call["image_index"]], _safe_int(output.get("total_cost"))
+            )
+    return {
+        "parsed_item_count": len(line_items),
+        "amount_sum": sum(by_category.values()),
+        "category_amounts": dict(sorted(by_category.items())),
+        "total_cost": sum(per_image_total.values()),
     }
 
 

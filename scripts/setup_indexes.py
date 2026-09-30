@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 from pymongo import MongoClient
 
 from app.core.config import get_settings
+from app.repositories.risk_parse_cache_repository import PARSE_CACHE_TTL_DAYS
 
 load_dotenv()
 
@@ -36,6 +37,13 @@ def main() -> None:
     # (expireAfterSeconds=0은 "필드 값 자체가 만료 시각"이라는 뜻, N초 후가 아님)
     db["pending_estimates"].create_index("expires_at", expireAfterSeconds=0)
     print("[pending_estimates] expires_at TTL 인덱스 확인 완료")
+
+    # 리스크 진단 파싱 캐시 — 마지막으로 쓰인 지 N일 지나면 삭제 (캐시가 걸릴 때마다 last_used_at 갱신 = 슬라이딩 TTL).
+    # 조회는 _id(해시:버전)로만 하므로 다른 인덱스는 필요 없다.
+    db["risk_parse_cache"].create_index(
+        "last_used_at", expireAfterSeconds=PARSE_CACHE_TTL_DAYS * 24 * 60 * 60
+    )
+    print(f"[risk_parse_cache] last_used_at TTL({PARSE_CACHE_TTL_DAYS}일) 인덱스 확인 완료")
 
 
 if __name__ == "__main__":

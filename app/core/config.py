@@ -41,6 +41,10 @@ class Settings(BaseSettings):
     # 요청 하나가 동시에 쓸 수 있는 Vision 호출 수. 업로드 이미지 수 제한이 없어 큰 요청 하나가 전역 슬롯을
     # 독점하는 걸 막는다. 8이면 테스트셋 최대(S4, 8청크)까지는 전부 한 번에 돌고, 그보다 큰 요청만 나눠서 돈다.
     risk_vision_max_concurrency_per_request: int = 8
+    # 리스크 진단 이미지 파싱 결과 캐시(risk_parse_cache 컬렉션). 같은 이미지(바이트 동일)를 다시 올리면 Vision을
+    # 다시 부르지 않고 예전 파싱 결과를 쓴다 — 비용·응답시간 절감 + 같은 이미지는 항상 같은 결과.
+    # 벤치 서버는 반복 측정이 캐시에 걸리지 않게 기본으로 끈다(scripts/bench/server.py --parse-cache).
+    risk_parse_cache_enabled: bool = True
 
 
 @lru_cache
