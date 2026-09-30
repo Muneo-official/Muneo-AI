@@ -152,6 +152,8 @@ def build_server_record(events: list[dict]) -> dict | None:
             "cache_creation_input_tokens": e.get("cache_creation_input_tokens", 0),
             "cache_read_input_tokens": e.get("cache_read_input_tokens", 0),
             "tool_called": e.get("tool_called", True),  # 필드 도입 전 로그는 강제 도구 호출이라 항상 호출됨
+            # 첫 호출이 도구 대신 글로 답해 재시도한 경우 — tool_called는 재시도 결과라 이게 없으면 첫 실패가 안 보인다
+            "retried": e.get("retried", False),
         })
     calls.sort(key=lambda c: (c["image_index"], c["chunk_index"]))
 

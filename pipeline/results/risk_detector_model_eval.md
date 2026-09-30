@@ -246,7 +246,9 @@ S3의 5.5 오답 7개가 모두 정의가 엇갈리는 항목이었다 — 도�
 **모델 교체 (Sonnet 4.6 → 5.5)**
 - 요청 형식: 도구 호출 `auto`, thinking `between_tools`(끔), 거부 대체 `fallbacks: "default"`(베타 `server-side-fallback-2026-07-01`,
   Claude API 전용 — Bedrock·Vertex로 옮기면 빼야 한다).
-- 도구 대신 글로 답한 호출은 한 번 재시도한다(거부는 제외). 로그 `risk_vision_call`에 `retried`·`stop_reason`·`served_model`.
+- 도구 대신 글로 답한 호출은 정상 종료(`end_turn`)일 때만 한 번 재시도한다. 거부(`refusal`)와 출력 한도(`max_tokens`)는
+  다시 보내도 같은 결과라 제외한다. 재시도 후에도 도구를 안 부른 청크가 있으면 그 이미지는 파싱 캐시에 저장하지 않는다
+  (불완전한 결과가 재업로드마다 고정되지 않게). 로그 `risk_vision_call`에 `retried`·`stop_reason`·`served_model`.
 - Sonnet 5.5는 Sonnet 4.x와 별도의 rate limit을 쓴다 — 운영 트래픽 전에 조직의 한도를 확인한다.
 - 모델명이 캐시 버전 키에 들어 있어 교체 시에도 캐시가 한 번 초기화된다.
 

@@ -111,13 +111,16 @@ def _risk_parse_version() -> str:
     (pipeline/results/risk_detector_cost_optimization.md). 그래서 이것들을 해시해 캐시 키에 넣는다 —
     바꾸면 자동으로 새로 파싱되고, 안 바꾸면 같은 이미지는 계속 같은 결과를 받는다.
 
+    모델별 요청 형식(tool_choice·thinking·fallbacks 등, build_risk_api_params가 붙이는 것)도 결과를 바꾸므로 함께
+    해시한다 — 이미지 데이터만 빼고 실제로 보내는 요청 그대로.
+
     병합 로직(pipeline.parsing.merge_chunk_results)은 코드라 해시로 못 잡는다 — 결과가 달라지게 고치면
     _PARSE_LOGIC_REVISION을 올린다.
     """
+    request = build_risk_api_params(b"", RISK_MODEL)
+    request.pop("messages")  # 이미지 데이터 — 지시문은 instructions로 따로 넣는다
     spec = {
-        "model": RISK_MODEL,
-        "max_tokens": MAX_TOKENS,
-        "tool": RISK_ESTIMATE_TOOL,
+        "request": request,  # model·max_tokens·tools·tool_choice·thinking·extra_headers·extra_body
         "instructions": TOOL_USE_INSTRUCTIONS,
         "chunking": [MAX_PARSE_WIDTH, SPLIT_HEIGHT_THRESHOLD, CHUNK_HEIGHT, CHUNK_OVERLAP],
         "logic_revision": _PARSE_LOGIC_REVISION,
@@ -126,7 +129,6 @@ def _risk_parse_version() -> str:
 
 
 _PARSE_LOGIC_REVISION = 1
-RISK_PARSE_VERSION = _risk_parse_version()
 
 
 def _build_image_params(image_bytes: bytes, tool: dict, model: str = MODEL) -> dict:
@@ -150,6 +152,10 @@ def _build_image_params(image_bytes: bytes, tool: dict, model: str = MODEL) -> d
             ],
         }],
     }
+
+
+# 요청을 만드는 함수(_build_image_params)가 정의된 뒤에 계산해야 한다
+RISK_PARSE_VERSION = _risk_parse_version()
 
 
 def build_pdf_api_params(pdf_bytes: bytes) -> dict:

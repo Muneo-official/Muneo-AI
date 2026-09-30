@@ -10,7 +10,8 @@ accuracy.py("기준 측정과 같은가")는 기준의 오분류까지 정답으
   `disputed`가 붙은 항목(공종 정의가 코드베이스 안에서 엇갈리는 폐기물처리·도어)은 기본으로 채점하지 않는다.
 - S1 정답 일치: 항목 28개·금액 합계 7,386,000원 (이미지와 한 줄씩 대조해 확정한 값)
 - 필름 분류: 필름시공 항목(S3, code 1001, 3,500,000원)이 필름으로 분류됐는지 + 리포트에 필름 이슈가 있는지
-- 도구 미호출: 강제 도구 호출이 안 되는 모델에서 도구 대신 글로 답한 Vision 호출 수
+- 도구 미호출: 강제 도구 호출이 안 되는 모델에서 재시도 후에도 도구 대신 글로 답한 Vision 호출 수
+- 재시도: 첫 호출이 도구 대신 글로 답해 한 번 더 부른 Vision 호출 수 (재시도가 성공하면 도구 미호출엔 안 잡힌다)
 - 요청당 비용·응답시간 (중앙값)
 
 사용법:
@@ -25,6 +26,8 @@ import statistics
 import sys
 from collections import defaultdict
 
+from pipeline.parsing import _safe_int
+
 for _stream in (sys.stdout, sys.stderr):
     if _stream.encoding and _stream.encoding.lower() != "utf-8":
         _stream.reconfigure(encoding="utf-8")
@@ -35,7 +38,8 @@ FILM_KEY = ("S3", "1001", 3_500_000)
 
 
 def _key(item: dict) -> tuple[str, int]:
-    return str(item.get("code", "")).strip(), int(item.get("amount") or 0)
+    # 모델이 금액을 "3,500,000"·"약 350만"처럼 내도 채점 전체가 멈추지 않게 파싱 단계와 같은 변환을 쓴다
+    return str(item.get("code", "")).strip(), _safe_int(item.get("amount"))
 
 
 def grade_run(case_id: str, line_items: list[dict], truth: list[dict]) -> dict:
@@ -82,6 +86,7 @@ def grade_file(path: pathlib.Path, truth: list[dict]) -> dict:
             "wall_s": r["wall_s"],
             "cost_usd": r.get("cost_usd"),
             "grade": grade_run(r["case_id"], items, truth_by_case.get(r["case_id"], [])),
+            "retried": sum(1 for c in (r.get("server") or {}).get("vision_calls", []) if c.get("retried")),
             "tool_not_called": sum(1 for c in (r.get("server") or {}).get("vision_calls", [])
                                    if c.get("tool_called") is False),
         }
@@ -105,6 +110,7 @@ def summarize(graded: dict) -> dict:
         "truth_missing": sum(r["grade"]["missing"] for r in graded_runs),
         "truth_items": total,
         "tool_not_called": sum(r["tool_not_called"] for r in runs),
+        "retried": sum(r["retried"] for r in runs),
     }
     s1 = [r["s1_exact"] for r in runs if "s1_exact" in r]
     out["s1_exact"] = f"{sum(s1)}/{len(s1)}" if s1 else "-"
@@ -136,11 +142,11 @@ def summarize(graded: dict) -> dict:
 
 
 def _print(summaries: list[dict]) -> None:
-    print(f"\n{'측정':<28}{'모델':<20}{'정답률':>8}{'누락':>6}{'S1일치':>8}{'필름':>6}{'필름이슈':>8}{'도구X':>6}")
+    print(f"\n{'측정':<28}{'모델':<20}{'정답률':>8}{'누락':>6}{'S1일치':>8}{'필름':>6}{'필름이슈':>8}{'도구X':>6}{'재시도':>6}")
     for s in summaries:
         acc = f"{s['truth_accuracy'] * 100:.0f}%" if s["truth_accuracy"] is not None else "-"
         print(f"{(s['label'] or '')[:27]:<28}{(s['model'] or '')[:19]:<20}{acc:>8}{s['truth_missing']:>6}"
-              f"{s['s1_exact']:>8}{s['film_ok']:>6}{s['film_issue']:>8}{s['tool_not_called']:>6}")
+              f"{s['s1_exact']:>8}{s['film_ok']:>6}{s['film_issue']:>8}{s['tool_not_called']:>6}{s['retried']:>6}")
     print(f"\n{'측정':<28}{'케이스':<6}{'n':>3}{'정답률':>8}{'wall p50':>10}{'비용 p50':>10}")
     for s in summaries:
         for c, v in s["cases"].items():

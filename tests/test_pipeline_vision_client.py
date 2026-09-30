@@ -156,6 +156,15 @@ def test_risk_params_follow_module_risk_model_at_call_time(monkeypatch):
     assert build_api_params(b"img")["model"] == vision_client.MODEL  # 수집 경로는 그대로
 
 
+def test_parse_version_changes_when_request_format_changes(monkeypatch):
+    # 모델이 같아도 tool_choice·thinking·fallbacks 같은 요청 형식이 바뀌면 결과가 달라지므로 캐시 버전도 바뀌어야 한다
+    before = vision_client._risk_parse_version()
+    monkeypatch.setattr(vision_client, "_SERVER_FALLBACK_MODELS", set())
+
+    assert vision_client._risk_parse_version() != before
+    assert vision_client.RISK_PARSE_VERSION == before  # 모듈 값은 import 시점에 고정
+
+
 def test_tool_called_is_false_when_model_answers_in_text():
     client = _fake_client([SimpleNamespace(type="text", text="견적서가 아닙니다")], _usage())
 

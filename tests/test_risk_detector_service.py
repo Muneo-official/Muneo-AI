@@ -339,8 +339,9 @@ async def test_retries_once_when_model_answers_without_tool(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_does_not_retry_refusal_or_successful_calls(monkeypatch):
-    for first in (_no_tool(stop_reason="refusal"), _call_result(_ONE_ITEM_RESULT)):
+async def test_does_not_retry_refusal_truncation_or_successful_calls(monkeypatch):
+    # 거부는 다시 보내도 또 거부, 출력 한도로 잘린 건 같은 요청이면 또 잘림, 정상 호출은 재시도 불필요
+    for first in (_no_tool(stop_reason="refusal"), _no_tool(stop_reason="max_tokens"), _call_result(_ONE_ITEM_RESULT)):
         calls: list[bytes] = []
 
         async def once(chunk, client, first=first):
@@ -351,7 +352,43 @@ async def test_does_not_retry_refusal_or_successful_calls(monkeypatch):
 
         await service._parse_images([b"x"])
 
-        assert len(calls) == 1  # 거부는 다시 보내도 또 거부, 정상 호출은 재시도 불필요
+        assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_image_with_a_chunk_that_never_called_tool_is_not_cached(monkeypatch):
+    # 3청크 중 1개가 재시도까지 글로 답하면, 나머지 청크 항목만으로 결과가 비어 있지 않아도 캐시하지 않는다
+    monkeypatch.setattr(service_module, "prepare_chunks_from_bytes", lambda raw: [b"c1", b"bad", b"c3"])
+
+    async def fake(chunk, client):
+        if chunk == b"bad":
+            return _no_tool()
+        return _call_result({"is_estimate": True, "line_items": [_item(chunk.decode())]})
+
+    monkeypatch.setattr(service_module, "acall_vision_api_with_usage", fake)
+    cache = _FakeParseCache()
+    service = RiskDetectorService(engine=_mock_engine(), parse_cache=cache)
+
+    items, _, _ = await service._parse_images([b"x"])
+
+    assert [i["description"] for i in items] == ["c1", "c3"]  # 이번 응답은 나머지 청크로 나가되
+    assert cache.store == {}  # 불완전한 결과가 재업로드마다 고정되지 않게
+
+
+@pytest.mark.asyncio
+async def test_image_is_cached_when_retry_recovers(monkeypatch):
+    responses = [_no_tool(), _call_result(_ONE_ITEM_RESULT)]
+
+    async def fake(chunk, client):
+        return responses.pop(0)
+
+    monkeypatch.setattr(service_module, "acall_vision_api_with_usage", fake)
+    cache = _FakeParseCache()
+    service = RiskDetectorService(engine=_mock_engine(), parse_cache=cache)
+
+    await service._parse_images([b"x"])
+
+    assert len(cache.store) == 1
 
 
 # ── 이미지 파싱 캐시 ──────────────────────────────────────────────────────────

@@ -31,6 +31,14 @@ def test_grade_run_matches_by_code_and_amount_and_consumes_duplicates():
     assert (g["correct"], g["missing"], g["wrong"]) == (1, 1, ["1 설비→욕실"])
 
 
+def test_grade_run_tolerates_malformed_amount():
+    # 모델이 금액을 문자열로 내도 채점 전체가 멈추지 않는다 (못 찾은 항목으로 센다)
+    truth = [_truth("S1", "1", 100, "설비")]
+    items = [{"code": "1", "amount": "약 100원", "category": "설비"}]
+
+    assert grade_run("S1", items, truth)["missing"] == 1
+
+
 def test_grade_file_and_summarize(tmp_path):
     film_items = [_item("1001", 3_500_000, "필름")]
     result = {
@@ -43,7 +51,7 @@ def test_grade_file_and_summarize(tmp_path):
             {"case_id": "S3", "warmup": False, "status": 200, "wall_s": 30.0, "cost_usd": 0.05,
              "parsed": {"line_items": film_items},
              "signature": {"issues": [["필름", "주의", "필름 가격 이상"]]},
-             "server": {"vision_calls": [{"tool_called": False}, {"tool_called": True}]}},
+             "server": {"vision_calls": [{"tool_called": False, "retried": True}, {"tool_called": True, "retried": True}]}},
             {"case_id": "S1", "warmup": True, "status": 200, "wall_s": 1.0, "parsed": {"line_items": []}},
         ],
     }
@@ -55,5 +63,6 @@ def test_grade_file_and_summarize(tmp_path):
 
     assert s["truth_accuracy"] == 1.0
     assert (s["s1_exact"], s["film_ok"], s["film_issue"]) == ("1/1", "1/1", "1/1")
-    assert s["tool_not_called"] == 1
+    assert s["tool_not_called"] == 1  # 재시도 후에도 실패한 호출
+    assert s["retried"] == 2  # 재시도가 성공한 호출도 따로 센다
     assert s["cases"]["S1"]["n"] == 1  # 워밍업 제외

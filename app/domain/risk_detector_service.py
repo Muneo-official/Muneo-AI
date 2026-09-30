@@ -50,6 +50,10 @@ CONTEXT_CARRYING_KEYWORDS = [
 ]
 
 
+# 도구 미호출 시 재시도할 종료 사유 (_call_vision 참고)
+_RETRYABLE_STOP_REASONS = {"end_turn"}
+
+
 def _combine_calls(first: VisionCallResult, retry: VisionCallResult) -> VisionCallResult:
     """재시도한 호출의 결과를 쓰되, 시간·토큰은 두 호출을 합친다 — 비용 계측이 실제 과금과 맞도록."""
     return VisionCallResult(
@@ -169,6 +173,8 @@ class RiskDetectorService:
         parsed, calls = await self._parse_uncached(to_parse)
 
         # 빈 결과는 저장하지 않는다 — 일시적인 파싱 실패가 "추출 실패"로 굳지 않도록.
+        # 청크 중 하나라도 재시도 후에도 도구를 안 불렀으면(거부·출력 한도 포함) 그 이미지도 저장하지 않는다 — 나머지
+        # 청크 항목만으로 결과가 비어 있지 않아도, 빠진 청크가 있는 불완전한 결과가 재업로드마다 고정돼 나가게 된다.
         # 이미지가 여러 장이면 저장을 동시에 보내 Mongo 왕복이 이미지 수만큼 쌓이지 않게 한다.
         put_started = time.perf_counter()
         await asyncio.gather(*(
@@ -178,7 +184,7 @@ class RiskDetectorService:
                 output_tokens=sum(c.output_tokens for c in image_calls),
             ))
             for key, (line_items, image_calls) in parsed.items()
-            if line_items
+            if line_items and all(c.tool_called for c in image_calls)
         ))
         store_s = time.perf_counter() - put_started
 
@@ -276,9 +282,10 @@ class RiskDetectorService:
             wait_s = time.perf_counter() - queued_at
             call = await acall_vision_api_with_usage(chunk, client)
             retried = False
-            if not call.tool_called and call.stop_reason != "refusal":
+            if not call.tool_called and call.stop_reason in _RETRYABLE_STOP_REASONS:
                 # 강제 도구 호출이 안 되는 모델(auto)은 드물게 도구 대신 글로 답할 수 있다 — 그대로 두면 그 청크가
-                # "견적서 아님"으로 버려진다. 한 번만 다시 부른다(거부는 다시 보내도 또 거부되므로 제외).
+                # "견적서 아님"으로 버려진다. 한 번만 다시 부른다. 정상 종료(end_turn)만 재시도한다 — 거부(refusal)는
+                # 다시 보내도 또 거부되고, 출력 한도(max_tokens)로 잘린 건 같은 요청이면 또 잘려 비용만 두 배가 된다.
                 retry = await acall_vision_api_with_usage(chunk, client)
                 call = _combine_calls(call, retry)
                 retried = True
