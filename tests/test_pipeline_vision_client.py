@@ -66,7 +66,7 @@ async def test_async_version_returns_same_shape():
     response = SimpleNamespace(content=[SimpleNamespace(type="tool_use", input=tool_input)], usage=_usage())
 
     async def create(**params):
-        assert params["tool_choice"] == {"type": "tool", "name": "record_estimate"}
+        assert params["model"] == vision_client.RISK_MODEL
         return response
 
     client = SimpleNamespace(messages=SimpleNamespace(create=create))
@@ -78,7 +78,8 @@ async def test_async_version_returns_same_shape():
 
 
 def test_risk_params_differ_from_collection_params_only_in_tool_schema():
-    risk = build_risk_api_params(b"img")
+    # 같은 모델로 보내면 수집 경로와 스키마만 다르다 (리스크 경로의 모델 교체는 별도 테스트)
+    risk = build_risk_api_params(b"img", vision_client.MODEL)
     collection = build_api_params(b"img")
 
     assert risk["tools"] == [RISK_ESTIMATE_TOOL]
@@ -99,8 +100,8 @@ def test_sync_call_keeps_collection_schema():
     assert sent["tools"] == [ESTIMATE_TOOL]
 
 
-def test_risk_params_use_forced_tool_for_default_and_haiku():
-    for model in (None, "claude-haiku-4-5"):
+def test_risk_params_use_forced_tool_for_models_that_allow_it():
+    for model in ("claude-sonnet-4-6", "claude-haiku-4-5"):
         params = build_risk_api_params(b"img", model)
         assert params["tool_choice"] == {"type": "tool", "name": "record_estimate"}
         assert "thinking" not in params
@@ -119,8 +120,18 @@ def test_risk_params_for_model_without_forced_tool_use_auto_and_turn_thinking_of
     assert params["extra_body"] == {"fallbacks": "default"}
 
 
+def test_production_risk_model_uses_auto_tool_choice_and_server_fallback():
+    # 운영 리스크 모델(Sonnet 5.5)은 옵션 없이 호출해도 5.5 요청 형식으로 나간다
+    params = build_risk_api_params(b"img")
+
+    assert params["model"] == "claude-sonnet-5-5"
+    assert params["tool_choice"] == {"type": "auto"}
+    assert params["extra_body"] == {"fallbacks": "default"}
+    assert build_api_params(b"img")["model"] == "claude-sonnet-4-6"  # 크롤링 수집은 그대로
+
+
 def test_server_fallback_only_for_models_that_need_it():
-    for model in (None, "claude-haiku-4-5"):
+    for model in ("claude-sonnet-4-6", "claude-haiku-4-5"):
         params = build_risk_api_params(b"img", model)
         assert "extra_headers" not in params and "extra_body" not in params
 

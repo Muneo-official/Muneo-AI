@@ -21,11 +21,12 @@ mock 모드(--mock-vision): Anthropic 클라이언트만 가짜로 바꾼다. �
 2회차부터 Vision을 안 불러 측정이 틀어진다. 캐시 히트 자체를 잴 때만 켠다(real 모드 전용, .env의 Mongo에 저장됨).
 
 --model: 리스크 진단 파싱 모델만 바꾼다(vision_client.RISK_MODEL). 모델별 요청 형식 차이(강제 도구 호출 불가 모델의
-tool_choice·thinking)는 build_risk_api_params가 처리한다. 운영과 다른 모델은 --parse-cache·--risk-schema full과 병용 불가.
+tool_choice·thinking)는 build_risk_api_params가 처리한다. 운영과 다른 모델은 --parse-cache와 병용 불가,
+--risk-schema full은 수집 모델(MODEL)로만 잰다(`--risk-schema full --model claude-sonnet-4-6`).
 
 사용법:
   python -m scripts.bench.server                                   # real
-  python -m scripts.bench.server --risk-schema full                # real, 축소 전 스키마(기준 측정용)
+  python -m scripts.bench.server --risk-schema full --model claude-sonnet-4-6   # real, 축소 전 스키마(기준 측정용)
   python -m scripts.bench.server --parse-cache                     # real, 파싱 캐시 켬(캐시 히트 측정용)
   python -m scripts.bench.server --model claude-haiku-4-5          # real, 리스크 파싱 모델 교체(모델 비교용)
   python -m scripts.bench.server --mock-vision logs/bench/latency_baseline_*.json
@@ -170,9 +171,10 @@ def main() -> None:
     if args.model != vision_client.RISK_MODEL and args.parse_cache:
         # 캐시 키의 파싱 버전은 서버 시작 시 운영 모델로 계산돼 있어, 다른 모델 결과가 운영 키로 저장된다
         parser.error("--model(운영과 다른 모델)은 --parse-cache와 같이 쓸 수 없습니다")
-    if args.model != vision_client.RISK_MODEL and args.risk_schema == "full":
-        # full 스키마 경로(build_api_params)는 수집용 MODEL을 쓰므로 --model이 조용히 무시된다
-        parser.error("--model(운영과 다른 모델)은 --risk-schema full과 같이 쓸 수 없습니다")
+    if args.risk_schema == "full" and args.model != vision_client.MODEL:
+        # full 스키마 경로(build_api_params)는 수집용 MODEL로 고정이라, 다른 모델을 지정하면(기본값인 운영 리스크 모델
+        # 포함) 서버는 그 모델이라고 표시하면서 실제로는 MODEL로 호출하고 비용도 틀린 단가로 계산된다
+        parser.error(f"--risk-schema full은 수집 모델로만 잴 수 있습니다: --model {vision_client.MODEL}을 함께 지정하세요")
     if args.parse_cache and args.risk_schema == "full":
         # 캐시 키의 파싱 버전은 운영 스키마 기준이라, full로 바꿔도 키가 같아 축소 스키마 결과가 섞인다
         parser.error("--parse-cache는 --risk-schema full과 같이 쓸 수 없습니다")

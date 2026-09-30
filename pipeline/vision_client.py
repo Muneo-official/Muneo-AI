@@ -30,8 +30,10 @@ from pipeline.tool_schema import ESTIMATE_TOOL, RISK_ESTIMATE_TOOL, TOOL_NAME, T
 
 MODEL = "claude-sonnet-4-6"
 MAX_TOKENS = 8192
-# 리스크 진단(실시간) 파싱 모델. 크롤링 수집은 MODEL 그대로 — 모델 비교(Sonnet 5.5·Haiku 4.5)는 리스크 경로만 대상이다.
-RISK_MODEL = MODEL
+# 리스크 진단(실시간) 파싱 모델. 크롤링 수집은 MODEL 그대로다.
+# Sonnet 4.6 → 5.5 교체: S3 비용 −33%, 응답 −69%, 정답률 중앙값 82% → 100%
+# (pipeline/results/risk_detector_model_comparison.md, 측정 전 확정한 기준 6개 통과)
+RISK_MODEL = "claude-sonnet-5-5"
 # 강제 도구 호출(tool_choice: tool/any)을 400으로 거부하는 모델 (claude-api 스킬 모델표, 2026-09-25 기준)
 _NO_FORCED_TOOL_MODELS = {"claude-sonnet-5-5"}
 # 서버 측 거부 대체(fallbacks: "default")를 켜는 모델. 안전 분류기가 요청을 거부하면 서버가 다른 모델로 다시 돌린다.
