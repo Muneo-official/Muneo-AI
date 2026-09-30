@@ -1,5 +1,12 @@
 from pipeline.categories import NORMALIZED_CATEGORIES
-from pipeline.tool_schema import ESTIMATE_TOOL, RISK_ESTIMATE_TOOL, RISK_FILM_CATEGORY_RULE, TOOL_NAME
+from pipeline.tool_schema import (
+    ESTIMATE_TOOL,
+    RISK_ESTIMATE_TOOL,
+    RISK_FAUCET_CATEGORY_RULE,
+    RISK_FILM_CATEGORY_RULE,
+    RISK_TOILET_CATEGORY_RULE,
+    TOOL_NAME,
+)
 
 
 def test_tool_name_matches_constant():
@@ -47,8 +54,13 @@ def test_risk_schema_drops_unit_and_quantity_requires_code_and_adds_film_rule():
     risk_category = _item_properties(RISK_ESTIMATE_TOOL)["category"]
     collection_category = _item_properties(ESTIMATE_TOOL)["category"]
     assert risk_category["enum"] == collection_category["enum"]
-    assert risk_category["description"] == f"{collection_category['description']} {RISK_FILM_CATEGORY_RULE}"
-    assert RISK_FILM_CATEGORY_RULE not in collection_category["description"]
+    assert risk_category["description"] == (
+        f"{collection_category['description']} {RISK_FILM_CATEGORY_RULE} {RISK_FAUCET_CATEGORY_RULE} "
+        f"{RISK_TOILET_CATEGORY_RULE}"
+    )
+    # 분류 규칙은 리스크 스키마에만 — 수집 스키마는 그대로
+    for rule in (RISK_FILM_CATEGORY_RULE, RISK_FAUCET_CATEGORY_RULE, RISK_TOILET_CATEGORY_RULE):
+        assert rule not in collection_category["description"]
     # 나머지(description·amount·unit_price, 도구 이름·설명, total_cost)는 수집 스키마와 같아야 한다
     for field, spec in _item_properties(RISK_ESTIMATE_TOOL).items():
         if field not in ("code", "category"):

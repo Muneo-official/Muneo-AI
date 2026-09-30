@@ -82,8 +82,33 @@ ESTIMATE_TOOL = {
 #
 # category 설명에 필름 규칙을 더한다: 필드를 뺀 스키마에서 "필름시공(샷시,문,틀,붙박이,현관 등)"을 3/3회 창호로
 # 분류해 필름 가격 이상 이슈가 사라졌다. 가격 체크 코퍼스의 정규화 규칙(시트공사→필름)과 같은 내용이다.
+#
+# 수전공사 섹션 규칙: 정답 파일의 D1(2026-09-29, "수전공사 섹션 → 설비")에 맞춘 규칙이다. 정규화 표
+# (pipeline/categories.py)가 "수전공사"·"수전/위생공사" 섹션을 설비로 보내는 것을 근거로 삼았다.
+# 모델은 그 섹션의 욕실 부속(파티션·선반·액세서리·환풍기·인건비)을 항목 내용대로 '욕실'로 분류하곤 했다(축소 전 스키마
+# Sonnet 4.6에서 3회 중 2회, Sonnet 5.5에서 13개 중 12개). 처음엔 "수전 항목만"으로 좁게 썼다가 섹션 단위로 넓혔다.
+#
+# 재검토 필요(공종 정의 통일, #62): 실제 코퍼스(estimate_cases 709건,
+# 2026-10-01 집계)는 욕실 부속이 설비·욕실로 거의 반반 섞여 있어(파티션 31:35%, 환풍기 44:44%, 천정재 36:52%) 이 규칙의
+# 데이터 근거는 약하다. 리스크 누락 룰(app/domain/risk_analyzer.py)은 수전을 설비, 샤워·환풍기·양변기·세면을 욕실로 본다 —
+# 현장 관행과도 맞는 이 기준(설비 = 배관·급배수·수전, 욕실 = 도기·파티션·액세서리·욕실장·천정재·환풍기)으로 바꾸는 것이 유력하다.
+#
+# 섹션 전체 일반 규칙("항목은 속한 섹션 공종으로")은 쓰지 않는다 — 공종 설명의 "작업 내용 기준"·"폐기물처리→공과잡비"와
+# 충돌하고, 정답 파일에 없는 보양·폐기물 항목까지 옮긴다.
 RISK_DROPPED_ITEM_FIELDS = ("unit", "quantity")
 RISK_FILM_CATEGORY_RULE = "필름·시트지 시공은 붙이는 대상(샷시·문·문틀·붙박이장 등)과 관계없이 '필름'으로 분류한다."
+RISK_FAUCET_CATEGORY_RULE = (
+    "견적서에 '수전공사' 또는 '수전/위생공사' 구분(섹션)이 있으면, 그 섹션에 속한 항목은 수전뿐 아니라 "
+    "샤워 파티션·선반·액세서리·환풍기·천정재·부자재·인건비까지 모두 '설비'로 분류한다."
+)
+# 도기 규칙: 도기(양변기·세면대)는 욕실 (D4, 2026-10-01). 실제 코퍼스는 양변기·세면기 항목의 다수가 욕실이고(905 vs 약 650),
+# 리스크 누락 룰(욕실 필수 항목에 양변기·세면·도기)과 가견적 엔진도 욕실이다. 정규화 표(pipeline/categories.py)의
+# "도기공사 → 설비"와는 다르다 — 정규화 표·코퍼스 재집계는 공종 정의 통일 후속 과제에서 맞춘다.
+# 규칙이 없으면 Sonnet 5.5가 도기공사 섹션을 5회 중 3회 설비로 보냈다(수전공사 섹션 규칙을 도기까지 넓혀 적용한 것으로 보임).
+RISK_TOILET_CATEGORY_RULE = (
+    "'도기공사' 구분(섹션)에 속한 항목(양변기·세면대·욕조 등 위생도기와 그 섹션의 방수·젠다이·부자재·인건비)은 "
+    "모두 '욕실'로 분류한다."
+)
 RISK_ESTIMATE_TOOL = copy.deepcopy(ESTIMATE_TOOL)
 _risk_item_schema = RISK_ESTIMATE_TOOL["input_schema"]["properties"]["line_items"]["items"]
 for _field in RISK_DROPPED_ITEM_FIELDS:
@@ -91,7 +116,9 @@ for _field in RISK_DROPPED_ITEM_FIELDS:
 _risk_item_schema["properties"]["code"]["description"] = (
     "견적서의 코드(항목 번호) 열 값. 코드 열이 있으면 모든 행에 빠짐없이 채우고, 코드 열이 없는 견적서면 빈 문자열."
 )
-_risk_item_schema["properties"]["category"]["description"] += " " + RISK_FILM_CATEGORY_RULE
+_risk_item_schema["properties"]["category"]["description"] += (
+    " " + RISK_FILM_CATEGORY_RULE + " " + RISK_FAUCET_CATEGORY_RULE + " " + RISK_TOILET_CATEGORY_RULE
+)
 _risk_item_schema["required"] = ["code", *_risk_item_schema["required"]]
 
 # tool use와 함께 쓰는 지시문 — 표/집계행 판별, total_cost 산정, 열 뒤바뀜 수정 등은
