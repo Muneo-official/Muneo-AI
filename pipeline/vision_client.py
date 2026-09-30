@@ -30,6 +30,15 @@ from pipeline.tool_schema import ESTIMATE_TOOL, RISK_ESTIMATE_TOOL, TOOL_NAME, T
 
 MODEL = "claude-sonnet-4-6"
 MAX_TOKENS = 8192
+# 리스크 진단(실시간) 파싱 모델. 크롤링 수집은 MODEL 그대로 — 모델 비교(Sonnet 5.5·Haiku 4.5)는 리스크 경로만 대상이다.
+RISK_MODEL = MODEL
+# 강제 도구 호출(tool_choice: tool/any)을 400으로 거부하는 모델 (claude-api 스킬 모델표, 2026-09-25 기준)
+_NO_FORCED_TOOL_MODELS = {"claude-sonnet-5-5"}
+# 서버 측 거부 대체(fallbacks: "default")를 켜는 모델. 안전 분류기가 요청을 거부하면 서버가 다른 모델로 다시 돌린다.
+# Sonnet 5.5에서는 "cyber"·"frontier_llm" 거부만 대체되고 "general_harms" 등은 그대로 거부로 온다(claude-api 스킬
+# model-migration.md, Safeguards and fallback). 견적서엔 거의 해당 없지만 Anthropic 권장 기본값이라 켠다.
+_SERVER_FALLBACK_MODELS = {"claude-sonnet-5-5"}
+_SERVER_FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
 _client: anthropic.Anthropic | None = None
 _async_client: anthropic.AsyncAnthropic | None = None
@@ -71,9 +80,26 @@ def build_api_params(image_bytes: bytes) -> dict:
     return _build_image_params(image_bytes, ESTIMATE_TOOL)
 
 
-def build_risk_api_params(image_bytes: bytes) -> dict:
-    """리스크 진단(실시간) 전용 — 출력 스키마만 RISK_ESTIMATE_TOOL(unit·quantity 제외, code 필수, 필름 분류 규칙)로 바꾸고 나머지는 같다."""
-    return _build_image_params(image_bytes, RISK_ESTIMATE_TOOL)
+def build_risk_api_params(image_bytes: bytes, model: str | None = None) -> dict:
+    """리스크 진단(실시간) 전용 — 출력 스키마만 RISK_ESTIMATE_TOOL(unit·quantity 제외, code 필수, 필름 분류 규칙)로 바꾸고 나머지는 같다.
+
+    model을 안 주면 RISK_MODEL(호출 시점의 모듈 값)을 쓴다 — 벤치 서버가 --model로 바꿔 모델을 비교한다.
+    """
+    model = model or RISK_MODEL
+    params = _build_image_params(image_bytes, RISK_ESTIMATE_TOOL, model)
+    if model in _NO_FORCED_TOOL_MODELS:
+        # 이 모델들은 강제 도구 호출(tool_choice: tool)이 400이다. 지시문이 이미 "record_estimate 도구를 호출해"라고
+        # 명시하므로 auto로 두고, 도구를 안 부른 호출은 VisionCallResult.tool_called로 드러낸다.
+        # strict는 켜지 않는다 — 스키마(additionalProperties·required)가 바뀌면 모델 비교에 변수가 하나 더 생긴다.
+        params["tool_choice"] = {"type": "auto"}
+        # thinking이 기본으로 켜져 있어 그대로 두면 생각 토큰이 출력으로 과금된다. 표 옮겨 적기에 생각은 필요 없다.
+        params["thinking"] = {"type": "between_tools"}
+    if model in _SERVER_FALLBACK_MODELS:
+        # client.beta.messages 대신 일반 messages.create + extra_headers/extra_body로 보낸다 — 벤치 서버의 캡처·mock이
+        # client.messages.create만 감싸고 있어서, beta 경로로 바꾸면 벤치가 조용히 실제 API를 우회하거나 깨진다.
+        params["extra_headers"] = {"anthropic-beta": _SERVER_FALLBACK_BETA}
+        params["extra_body"] = {"fallbacks": "default"}
+    return params
 
 
 def _risk_parse_version() -> str:
@@ -87,7 +113,7 @@ def _risk_parse_version() -> str:
     _PARSE_LOGIC_REVISION을 올린다.
     """
     spec = {
-        "model": MODEL,
+        "model": RISK_MODEL,
         "max_tokens": MAX_TOKENS,
         "tool": RISK_ESTIMATE_TOOL,
         "instructions": TOOL_USE_INSTRUCTIONS,
@@ -101,9 +127,9 @@ _PARSE_LOGIC_REVISION = 1
 RISK_PARSE_VERSION = _risk_parse_version()
 
 
-def _build_image_params(image_bytes: bytes, tool: dict) -> dict:
+def _build_image_params(image_bytes: bytes, tool: dict, model: str = MODEL) -> dict:
     return {
-        "model": MODEL,
+        "model": model,
         "max_tokens": MAX_TOKENS,
         "tools": [tool],
         "tool_choice": {"type": "tool", "name": TOOL_NAME},
@@ -164,13 +190,22 @@ class VisionCallResult:
     output_tokens: int
     cache_creation_input_tokens: int
     cache_read_input_tokens: int
+    # 도구를 안 부르고 글로만 답했는지 — 강제 도구 호출이 안 되는 모델(auto)에서 파싱 실패가 조용히 "견적서 아님"으로
+    # 바뀌는 걸 구분하려고 둔다
+    tool_called: bool = True
+    # "refusal"이면 안전 분류기 거부 — 같은 요청을 다시 보내도 또 거부되므로 재시도 대상이 아니다
+    stop_reason: str | None = None
+    # 실제로 응답한 모델 — 거부 대체(fallbacks)가 돌면 요청 모델과 달라진다
+    model: str | None = None
 
 
 def _to_call_result(response, latency_s: float) -> VisionCallResult:
     result = {"is_estimate": False}
+    tool_called = False
     for block in response.content:
         if block.type == "tool_use":
             result = block.input
+            tool_called = True
             break
 
     usage = response.usage
@@ -181,6 +216,9 @@ def _to_call_result(response, latency_s: float) -> VisionCallResult:
         output_tokens=usage.output_tokens,
         cache_creation_input_tokens=getattr(usage, "cache_creation_input_tokens", None) or 0,
         cache_read_input_tokens=getattr(usage, "cache_read_input_tokens", None) or 0,
+        tool_called=tool_called,
+        stop_reason=getattr(response, "stop_reason", None),
+        model=getattr(response, "model", None),
     )
 
 

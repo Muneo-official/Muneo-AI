@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from pipeline import vision_client
 from pipeline.tool_schema import ESTIMATE_TOOL, RISK_ESTIMATE_TOOL
 from pipeline.vision_client import (
     acall_vision_api_with_usage,
@@ -96,6 +97,61 @@ def test_sync_call_keeps_collection_schema():
     call_vision_api_with_usage(b"img", SimpleNamespace(messages=SimpleNamespace(create=create)))
 
     assert sent["tools"] == [ESTIMATE_TOOL]
+
+
+def test_risk_params_use_forced_tool_for_default_and_haiku():
+    for model in (None, "claude-haiku-4-5"):
+        params = build_risk_api_params(b"img", model)
+        assert params["tool_choice"] == {"type": "tool", "name": "record_estimate"}
+        assert "thinking" not in params
+    assert build_risk_api_params(b"img", "claude-haiku-4-5")["model"] == "claude-haiku-4-5"
+
+
+def test_risk_params_for_model_without_forced_tool_use_auto_and_turn_thinking_off():
+    params = build_risk_api_params(b"img", "claude-sonnet-5-5")
+
+    assert params["model"] == "claude-sonnet-5-5"
+    assert params["tool_choice"] == {"type": "auto"}  # 강제 호출은 400
+    assert params["thinking"] == {"type": "between_tools"}  # 기본 thinking이 출력 토큰으로 과금되지 않게
+    assert params["tools"] == [RISK_ESTIMATE_TOOL]  # 스키마는 모델과 무관하게 같다
+    # 거부 대체: 일반 messages.create에 헤더·본문으로 실어 보낸다 (벤치 캡처·mock이 messages.create만 감싸서)
+    assert params["extra_headers"] == {"anthropic-beta": "server-side-fallback-2026-07-01"}
+    assert params["extra_body"] == {"fallbacks": "default"}
+
+
+def test_server_fallback_only_for_models_that_need_it():
+    for model in (None, "claude-haiku-4-5"):
+        params = build_risk_api_params(b"img", model)
+        assert "extra_headers" not in params and "extra_body" not in params
+
+
+def test_call_result_records_stop_reason_and_serving_model():
+    response = SimpleNamespace(
+        content=[SimpleNamespace(type="tool_use", input={})], usage=_usage(),
+        stop_reason="tool_use", model="claude-sonnet-5",
+    )
+    client = SimpleNamespace(messages=SimpleNamespace(create=lambda **params: response))
+
+    call = call_vision_api_with_usage(b"img", client)
+
+    assert (call.stop_reason, call.model) == ("tool_use", "claude-sonnet-5")
+
+
+def test_risk_params_follow_module_risk_model_at_call_time(monkeypatch):
+    # 벤치 서버가 --model로 모듈 값을 바꾸면 이후 호출부터 그 모델로 나간다
+    monkeypatch.setattr(vision_client, "RISK_MODEL", "claude-haiku-4-5")
+
+    assert build_risk_api_params(b"img")["model"] == "claude-haiku-4-5"
+    assert build_api_params(b"img")["model"] == vision_client.MODEL  # 수집 경로는 그대로
+
+
+def test_tool_called_is_false_when_model_answers_in_text():
+    client = _fake_client([SimpleNamespace(type="text", text="견적서가 아닙니다")], _usage())
+
+    call = call_vision_api_with_usage(b"img", client)
+
+    assert call.tool_called is False
+    assert call.result == {"is_estimate": False}
 
 
 @pytest.mark.asyncio

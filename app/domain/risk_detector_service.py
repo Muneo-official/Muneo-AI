@@ -50,6 +50,21 @@ CONTEXT_CARRYING_KEYWORDS = [
 ]
 
 
+def _combine_calls(first: VisionCallResult, retry: VisionCallResult) -> VisionCallResult:
+    """재시도한 호출의 결과를 쓰되, 시간·토큰은 두 호출을 합친다 — 비용 계측이 실제 과금과 맞도록."""
+    return VisionCallResult(
+        result=retry.result,
+        latency_s=first.latency_s + retry.latency_s,
+        input_tokens=first.input_tokens + retry.input_tokens,
+        output_tokens=first.output_tokens + retry.output_tokens,
+        cache_creation_input_tokens=first.cache_creation_input_tokens + retry.cache_creation_input_tokens,
+        cache_read_input_tokens=first.cache_read_input_tokens + retry.cache_read_input_tokens,
+        tool_called=retry.tool_called,
+        stop_reason=retry.stop_reason,
+        model=retry.model,
+    )
+
+
 class RiskDetectorService:
     def __init__(
         self,
@@ -260,6 +275,13 @@ class RiskDetectorService:
         async with request_slots, self._vision_slots:
             wait_s = time.perf_counter() - queued_at
             call = await acall_vision_api_with_usage(chunk, client)
+            retried = False
+            if not call.tool_called and call.stop_reason != "refusal":
+                # 강제 도구 호출이 안 되는 모델(auto)은 드물게 도구 대신 글로 답할 수 있다 — 그대로 두면 그 청크가
+                # "견적서 아님"으로 버려진다. 한 번만 다시 부른다(거부는 다시 보내도 또 거부되므로 제외).
+                retry = await acall_vision_api_with_usage(chunk, client)
+                call = _combine_calls(call, retry)
+                retried = True
         log_event(
             "risk_vision_call",
             image_index=image_index,
@@ -271,6 +293,10 @@ class RiskDetectorService:
             output_tokens=call.output_tokens,
             cache_creation_input_tokens=call.cache_creation_input_tokens,
             cache_read_input_tokens=call.cache_read_input_tokens,
+            tool_called=call.tool_called,
+            retried=retried,
+            stop_reason=call.stop_reason,
+            served_model=call.model,
         )
         return call
 

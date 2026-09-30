@@ -22,7 +22,7 @@ from datetime import datetime
 
 import httpx
 
-from pipeline.vision_client import MODEL
+from pipeline.vision_client import RISK_MODEL
 from scripts.bench.common import (
     DEFAULT_CASES_FILE,
     DEFAULT_LOG_FILE,
@@ -75,9 +75,9 @@ def _fetch_capture(client: httpx.Client, request_id: str, digests: dict) -> dict
     return {"vision_calls": calls, "unmatched_calls": unmatched, "line_items": raw["line_items"] or []}
 
 
-def _confirm(cases: list[dict], runs: int, warmup: int) -> bool:
+def _confirm(cases: list[dict], runs: int, warmup: int, model: str) -> bool:
     calls = sum(c["total_chunks"] for c in cases) * runs + (cases[0]["total_chunks"] * warmup)
-    print(f"모델 {MODEL} · 케이스 {len(cases)}개 × {runs}회 + 워밍업 {warmup}회")
+    print(f"모델 {model} · 케이스 {len(cases)}개 × {runs}회 + 워밍업 {warmup}회")
     print(f"예상 Vision 호출 약 {calls}회 (실제 API 과금). 계속할까요? [y/N] ", end="", flush=True)
     return input().strip().lower() == "y"
 
@@ -136,7 +136,9 @@ def main() -> None:
         if info.get("vision") != "real":
             raise SystemExit(f"서버가 real 모드가 아닙니다: {info} — mock 결과로 비용·지연을 재면 안 됩니다.")
         print(f"서버: {info}")
-        if not args.yes and not _confirm(cases, args.runs, args.warmup):
+        # 비용은 서버가 실제로 쓴 모델 단가로 — 벤치 서버 --model로 운영과 다른 모델을 잴 수 있다
+        model = info.get("model", RISK_MODEL)
+        if not args.yes and not _confirm(cases, args.runs, args.warmup, model):
             return
         capture = bool(info.get("capture"))
         digests = {c["id"]: case_chunk_digests(c) for c in cases} if capture else {}
@@ -173,7 +175,7 @@ def main() -> None:
         r["server"] = server
         if server:
             r["cost_usd"] = round(cost_usd(
-                MODEL, server["input_tokens"], server["output_tokens"],
+                model, server["input_tokens"], server["output_tokens"],
                 server["cache_creation_input_tokens"], server["cache_read_input_tokens"],
             ), 6)
         if body and not r["warmup"]:
@@ -198,7 +200,7 @@ def main() -> None:
         "note": args.note,
         "started_at": started_at,
         "git_commit": git_commit(),
-        "model": MODEL,
+        "model": model,
         "pricing_checked_at": PRICING_CHECKED_AT,
         "base_url": args.base_url,
         "server_info": info,

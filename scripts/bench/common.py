@@ -28,12 +28,13 @@ BENCH_DIR = pathlib.Path("logs/bench")  # logs/는 gitignore — 크롤링 데�
 DEFAULT_CASES_FILE = BENCH_DIR / "cases.json"
 DEFAULT_LOG_FILE = pathlib.Path("logs/app.log")
 
-# USD / 1M tokens, Anthropic 1st-party 단가 (claude-api 스킬 모델표 캐시 2026-06-24, 2026-09-27 조회).
+# USD / 1M tokens, Anthropic 1st-party 단가 (claude-api 스킬 모델표 캐시 2026-09-25, 2026-09-30 조회).
 # input_tokens는 캐시되지 않은 입력만 센다 — 캐시 쓰기/읽기는 별도 필드로 따로 과금된다.
-PRICING_CHECKED_AT = "2026-09-27"
+PRICING_CHECKED_AT = "2026-09-30"
 PRICING_PER_MTOK = {
     "claude-sonnet-4-6": {"input": 3.0, "output": 15.0},
     "claude-sonnet-5": {"input": 2.0, "output": 10.0},
+    "claude-sonnet-5-5": {"input": 2.0, "output": 10.0},
     "claude-haiku-4-5": {"input": 1.0, "output": 5.0},
 }
 CACHE_WRITE_MULTIPLIER = 1.25  # 5분 TTL 기준
@@ -150,6 +151,7 @@ def build_server_record(events: list[dict]) -> dict | None:
             "output_tokens": e["output_tokens"],
             "cache_creation_input_tokens": e.get("cache_creation_input_tokens", 0),
             "cache_read_input_tokens": e.get("cache_read_input_tokens", 0),
+            "tool_called": e.get("tool_called", True),  # 필드 도입 전 로그는 강제 도구 호출이라 항상 호출됨
         })
     calls.sort(key=lambda c: (c["image_index"], c["chunk_index"]))
 

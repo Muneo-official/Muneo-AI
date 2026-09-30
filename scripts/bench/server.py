@@ -20,10 +20,14 @@ mock 모드(--mock-vision): Anthropic 클라이언트만 가짜로 바꾼다. �
 --parse-cache: 이미지 파싱 캐시(risk_parse_cache)를 켠다. 기본은 꺼짐 — 켜두면 같은 이미지 반복 측정의
 2회차부터 Vision을 안 불러 측정이 틀어진다. 캐시 히트 자체를 잴 때만 켠다(real 모드 전용, .env의 Mongo에 저장됨).
 
+--model: 리스크 진단 파싱 모델만 바꾼다(vision_client.RISK_MODEL). 모델별 요청 형식 차이(강제 도구 호출 불가 모델의
+tool_choice·thinking)는 build_risk_api_params가 처리한다. 운영과 다른 모델은 --parse-cache·--risk-schema full과 병용 불가.
+
 사용법:
   python -m scripts.bench.server                                   # real
   python -m scripts.bench.server --risk-schema full                # real, 축소 전 스키마(기준 측정용)
   python -m scripts.bench.server --parse-cache                     # real, 파싱 캐시 켬(캐시 히트 측정용)
+  python -m scripts.bench.server --model claude-haiku-4-5          # real, 리스크 파싱 모델 교체(모델 비교용)
   python -m scripts.bench.server --mock-vision logs/bench/latency_baseline_*.json
   python -m scripts.bench.server --mock-vision-fixed 20            # 실측 전, 고정 20초
 """
@@ -48,8 +52,7 @@ from app.core.rate_limit import limiter
 from app.domain.risk_analyzer import RiskAnalyzer
 from app.main import app
 from pipeline import vision_client
-from pipeline.vision_client import MODEL
-from scripts.bench.common import params_image_digest
+from scripts.bench.common import PRICING_PER_MTOK, params_image_digest
 
 # 30평대 전체 리모델링 견적서에서 흔히 나오는 공종 구성 — 룰 분석·가격 체크가 실제처럼 돌도록
 _MOCK_PARSE_RESULT = {
@@ -161,7 +164,15 @@ def main() -> None:
     parser.add_argument("--parse-cache", action="store_true",
                         help="이미지 파싱 캐시를 켠다(운영과 같음). 기본은 꺼짐 — 같은 이미지로 반복 측정하면 2회차부터 "
                              "Vision을 안 불러서 지연·비용·정확도 측정이 틀어지기 때문")
+    parser.add_argument("--model", choices=sorted(PRICING_PER_MTOK), default=vision_client.RISK_MODEL,
+                        help="리스크 진단 파싱 모델 (기본: 운영과 같음). 모델 비교 측정용")
     args = parser.parse_args()
+    if args.model != vision_client.RISK_MODEL and args.parse_cache:
+        # 캐시 키의 파싱 버전은 서버 시작 시 운영 모델로 계산돼 있어, 다른 모델 결과가 운영 키로 저장된다
+        parser.error("--model(운영과 다른 모델)은 --parse-cache와 같이 쓸 수 없습니다")
+    if args.model != vision_client.RISK_MODEL and args.risk_schema == "full":
+        # full 스키마 경로(build_api_params)는 수집용 MODEL을 쓰므로 --model이 조용히 무시된다
+        parser.error("--model(운영과 다른 모델)은 --risk-schema full과 같이 쓸 수 없습니다")
     if args.parse_cache and args.risk_schema == "full":
         # 캐시 키의 파싱 버전은 운영 스키마 기준이라, full로 바꿔도 키가 같아 축소 스키마 결과가 섞인다
         parser.error("--parse-cache는 --risk-schema full과 같이 쓸 수 없습니다")
@@ -174,6 +185,8 @@ def main() -> None:
     get_settings.cache_clear()
 
     limiter.enabled = False
+    # build_risk_api_params가 호출 시점에 모듈 값을 읽으므로 여기서 바꾸면 리스크 경로 요청만 바뀐다
+    vision_client.RISK_MODEL = args.model
     if args.risk_schema == "full":
         # acall_vision_api_with_usage가 모듈 전역 이름으로 찾으므로 여기서 바꾸면 리스크 경로 요청만 바뀐다
         vision_client.build_risk_api_params = vision_client.build_api_params
@@ -186,7 +199,7 @@ def main() -> None:
         mode = {"vision": "mock", "latency_source": f"fixed {args.mock_vision_fixed}s", "latency_samples": 1}
     else:
         _install_capture()
-        mode = {"vision": "real", "model": MODEL, "capture": True, "risk_schema": args.risk_schema,
+        mode = {"vision": "real", "model": args.model, "capture": True, "risk_schema": args.risk_schema,
                 "parse_cache": args.parse_cache}
 
     @app.get("/bench/info")
