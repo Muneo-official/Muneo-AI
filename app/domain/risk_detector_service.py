@@ -7,9 +7,13 @@
 
 Vision 파싱은 모든 이미지·청크를 동시에 호출한다. 처음엔 하나씩 기다려서 응답시간이 청크 수에
 비례했다(S3 5청크 약 196초, S4 8청크 약 265초 — docs/RISK_DETECTOR_PERF_COST_LOG.md 베이스라인).
+
+이미지 1장의 파싱 결과는 원본 바이트 해시로 캐시한다(RiskParseCacheRepository) — 같은 이미지를 다시
+올리면 Vision을 다시 부르지 않고, 모델 출력의 실행 간 변동 없이 항상 같은 결과를 받는다.
 """
 
 import asyncio
+import hashlib
 import time
 from typing import Any
 
@@ -22,10 +26,16 @@ from app.domain.risk_constants import SUPPORTED_SPACE_TYPES
 from app.domain.risk_formatter import ResponseFormatter
 from app.domain.risk_models import RiskIssue
 from app.domain.risk_price_checker import check_price_anomalies
+from app.repositories.risk_parse_cache_repository import CachedParse, RiskParseCacheRepository
 from app.schemas.risk import AnalyzeRiskCommand
 from pipeline.image_prep import prepare_chunks_from_bytes
 from pipeline.parsing import merge_chunk_results
-from pipeline.vision_client import VisionCallResult, acall_vision_api_with_usage, get_async_client
+from pipeline.vision_client import (
+    RISK_PARSE_VERSION,
+    VisionCallResult,
+    acall_vision_api_with_usage,
+    get_async_client,
+)
 
 CONTEXT_CARRYING_KEYWORDS = [
     "양중",
@@ -46,8 +56,11 @@ class RiskDetectorService:
         engine: EstimateEngine,
         vision_max_concurrency: int = 20,
         vision_max_concurrency_per_request: int = 8,
+        parse_cache: RiskParseCacheRepository | None = None,
     ) -> None:
         self._engine = engine
+        # None이면 캐시 없이 매번 Vision을 호출한다 (설정으로 끌 때, 벤치에서 반복 측정할 때)
+        self._parse_cache = parse_cache
         self.analyzer = RiskAnalyzer()
         self.formatter = ResponseFormatter()
         # 서비스는 앱당 하나(app.state)라 이 세마포어가 곧 프로세스 전체의 동시 Vision 호출 상한이다.
@@ -61,7 +74,7 @@ class RiskDetectorService:
         self._validate_input(command)
         started = time.perf_counter()
 
-        all_items, vision_calls = await self._parse_images(command.image_files)
+        all_items, vision_calls, cache_log = await self._parse_images(command.image_files)
         parsed_at = time.perf_counter()
         rule_analyze_s = price_check_s = 0.0
 
@@ -118,22 +131,96 @@ class RiskDetectorService:
             output_tokens=sum(c.output_tokens for c in vision_calls),
             cache_creation_input_tokens=sum(c.cache_creation_input_tokens for c in vision_calls),
             cache_read_input_tokens=sum(c.cache_read_input_tokens for c in vision_calls),
+            **cache_log,
         )
         return result
 
     async def _parse_images(
         self, image_files: list[bytes]
-    ) -> tuple[list[dict[str, Any]], list[VisionCallResult]]:
+    ) -> tuple[list[dict[str, Any]], list[VisionCallResult], dict[str, Any]]:
+        """이미지별 파싱 결과를 (이미지 순서대로) 합친 항목, 실제 Vision 호출 목록, 캐시 로그 필드를 반환한다."""
+        started = time.perf_counter()
+        digests = [hashlib.sha256(raw).hexdigest() for raw in image_files]
+        keys = [f"{digest}:{RISK_PARSE_VERSION}" for digest in digests]
+        cached = await self._cache_get(keys)
+        # 캐시가 응답시간에 더하는 비용(해시 + Mongo 조회) — 미스일 때 이만큼이 순수 오버헤드다
+        lookup_s = time.perf_counter() - started
+
+        # 캐시에 없는 이미지만 파싱한다. 같은 요청에 같은 이미지가 여러 장 있으면 한 번만.
+        to_parse: dict[str, tuple[int, bytes]] = {}
+        for image_index, (key, raw) in enumerate(zip(keys, image_files)):
+            if key not in cached and key not in to_parse:
+                to_parse[key] = (image_index, raw)
+        parsed, calls = await self._parse_uncached(to_parse)
+
+        # 빈 결과는 저장하지 않는다 — 일시적인 파싱 실패가 "추출 실패"로 굳지 않도록.
+        # 이미지가 여러 장이면 저장을 동시에 보내 Mongo 왕복이 이미지 수만큼 쌓이지 않게 한다.
+        put_started = time.perf_counter()
+        await asyncio.gather(*(
+            self._cache_put(key, CachedParse(
+                line_items=line_items,
+                input_tokens=sum(c.input_tokens for c in image_calls),
+                output_tokens=sum(c.output_tokens for c in image_calls),
+            ))
+            for key, (line_items, image_calls) in parsed.items()
+            if line_items
+        ))
+        store_s = time.perf_counter() - put_started
+
+        all_items: list[dict[str, Any]] = []
+        for key in keys:
+            line_items = cached[key].line_items if key in cached else parsed[key][0]
+            all_items.extend(self._merge_across_images(all_items, line_items))
+
+        hits = [key for key in keys if key in cached]
+        cache_log = {
+            "image_sha256": digests,  # 캐시를 꺼도 남긴다 — 재업로드 비율을 로그로 셀 수 있게
+            "parse_cache_hits": len(hits),
+            "parse_cache_misses": len(keys) - len(hits),
+            "parse_cache_saved_input_tokens": sum(cached[key].input_tokens for key in hits),
+            "parse_cache_saved_output_tokens": sum(cached[key].output_tokens for key in hits),
+            "parse_cache_lookup_s": round(lookup_s, 4),
+            "parse_cache_store_s": round(store_s, 4),
+        }
+        return all_items, calls, cache_log
+
+    async def _cache_get(self, keys: list[str]) -> dict[str, CachedParse]:
+        if self._parse_cache is None:
+            return {}
+        try:
+            return await self._parse_cache.get_many(keys)
+        except Exception as e:
+            # 캐시 장애로 분석 자체가 실패하면 안 된다 — 캐시 없이 Vision을 호출하는 원래 경로로
+            log_event("risk_parse_cache_error", op="get", error=repr(e))
+            return {}
+
+    async def _cache_put(self, key: str, parsed: CachedParse) -> None:
+        if self._parse_cache is None:
+            return
+        try:
+            await self._parse_cache.put(key, parsed)
+        except Exception as e:
+            log_event("risk_parse_cache_error", op="put", error=repr(e))
+
+    async def _parse_uncached(
+        self, to_parse: dict[str, tuple[int, bytes]]
+    ) -> tuple[dict[str, tuple[list[dict[str, Any]], list[VisionCallResult]]], list[VisionCallResult]]:
+        """캐시 키별 (병합된 line_items, 그 이미지의 Vision 호출들)과 전체 호출 목록을 반환한다."""
+        if not to_parse:
+            return {}, []
         client = get_async_client()
         # 리사이즈·PNG 인코딩은 CPU 작업이라 이벤트 루프를 막지 않게 threadpool에서
-        chunks_per_image = [await run_in_threadpool(prepare_chunks_from_bytes, raw) for raw in image_files]
+        chunks_per_image = [
+            (image_index, await run_in_threadpool(prepare_chunks_from_bytes, raw))
+            for image_index, raw in to_parse.values()
+        ]
 
         request_slots = asyncio.Semaphore(self._per_request_limit)
         tasks = [
             asyncio.create_task(
                 self._call_vision(client, request_slots, image_index, chunk_index, len(chunks), chunk)
             )
-            for image_index, chunks in enumerate(chunks_per_image)
+            for image_index, chunks in chunks_per_image
             for chunk_index, chunk in enumerate(chunks)
         ]
         try:
@@ -148,15 +235,16 @@ class RiskDetectorService:
             await asyncio.gather(*tasks, return_exceptions=True)
             raise
 
-        # 완료 순서와 무관하게 (이미지, 청크) 순서로 다시 모아 기존 병합 로직에 넘긴다
-        all_items: list[dict[str, Any]] = []
+        # 완료 순서와 무관하게 (이미지, 청크) 순서로 다시 모아 이미지 단위로 청크 병합한다
+        # (이미지 간 병합은 호출자가 캐시 결과와 섞어 원래 업로드 순서대로 한다)
+        parsed: dict[str, tuple[list[dict[str, Any]], list[VisionCallResult]]] = {}
         cursor = 0
-        for chunks in chunks_per_image:
-            chunk_results = [call.result for call in calls[cursor : cursor + len(chunks)]]
+        for key, (_, chunks) in zip(to_parse, chunks_per_image):
+            image_calls = list(calls[cursor : cursor + len(chunks)])
             cursor += len(chunks)
-            merged = merge_chunk_results(chunk_results)
-            all_items.extend(self._merge_across_images(all_items, merged.get("line_items", [])))
-        return all_items, list(calls)
+            merged = merge_chunk_results([call.result for call in image_calls])
+            parsed[key] = (merged.get("line_items", []), image_calls)
+        return parsed, list(calls)
 
     async def _call_vision(
         self,

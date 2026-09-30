@@ -9,6 +9,8 @@ Anthropic API를 실제로 호출하는 모듈이라 API 키 없이는 단위테
 """
 
 import base64
+import hashlib
+import json
 import os
 import time
 from dataclasses import dataclass
@@ -16,7 +18,13 @@ from dataclasses import dataclass
 import anthropic
 
 from pipeline.crawl_filter import is_boilerplate
-from pipeline.image_prep import prepare_chunks
+from pipeline.image_prep import (
+    CHUNK_HEIGHT,
+    CHUNK_OVERLAP,
+    MAX_PARSE_WIDTH,
+    SPLIT_HEIGHT_THRESHOLD,
+    prepare_chunks,
+)
 from pipeline.parsing import merge_chunk_results
 from pipeline.tool_schema import ESTIMATE_TOOL, RISK_ESTIMATE_TOOL, TOOL_NAME, TOOL_USE_INSTRUCTIONS
 
@@ -66,6 +74,31 @@ def build_api_params(image_bytes: bytes) -> dict:
 def build_risk_api_params(image_bytes: bytes) -> dict:
     """리스크 진단(실시간) 전용 — 출력 스키마만 RISK_ESTIMATE_TOOL(unit·quantity 제외, code 필수, 필름 분류 규칙)로 바꾸고 나머지는 같다."""
     return _build_image_params(image_bytes, RISK_ESTIMATE_TOOL)
+
+
+def _risk_parse_version() -> str:
+    """리스크 진단 파싱 결과 캐시(RiskParseCacheRepository)의 버전 — 이 값이 바뀌면 기존 캐시는 전부 무시된다.
+
+    같은 이미지라도 모델·출력 스키마·지시문·청크 분할이 바뀌면 파싱 결과(특히 경계 공종 분류)가 달라진다
+    (pipeline/results/risk_detector_cost_optimization.md). 그래서 이것들을 해시해 캐시 키에 넣는다 —
+    바꾸면 자동으로 새로 파싱되고, 안 바꾸면 같은 이미지는 계속 같은 결과를 받는다.
+
+    병합 로직(pipeline.parsing.merge_chunk_results)은 코드라 해시로 못 잡는다 — 결과가 달라지게 고치면
+    _PARSE_LOGIC_REVISION을 올린다.
+    """
+    spec = {
+        "model": MODEL,
+        "max_tokens": MAX_TOKENS,
+        "tool": RISK_ESTIMATE_TOOL,
+        "instructions": TOOL_USE_INSTRUCTIONS,
+        "chunking": [MAX_PARSE_WIDTH, SPLIT_HEIGHT_THRESHOLD, CHUNK_HEIGHT, CHUNK_OVERLAP],
+        "logic_revision": _PARSE_LOGIC_REVISION,
+    }
+    return hashlib.sha256(json.dumps(spec, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()[:16]
+
+
+_PARSE_LOGIC_REVISION = 1
+RISK_PARSE_VERSION = _risk_parse_version()
 
 
 def _build_image_params(image_bytes: bytes, tool: dict) -> dict:

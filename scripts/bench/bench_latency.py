@@ -90,17 +90,25 @@ def _summarize(requests: list[dict], cases: list[dict]) -> None:
         if not rows:
             print(f"{case['id']:<5}  (성공한 요청 없음)")
             continue
+        # 파싱 캐시 히트와 미스는 시간·비용이 완전히 다른 분포라 섞어서 중앙값을 내면 둘 다 안 보인다
+        hit_rows = [r for r in rows if r["server"].get("parse_cache_hits")]
+        miss_rows = [r for r in rows if not r["server"].get("parse_cache_hits")]
+        for suffix, group in (("", miss_rows), ("+hit", hit_rows)):
+            if group:
+                _print_row(f"{case['id']}{suffix}", case["total_chunks"], group)
 
-        def med(key: str) -> float:
-            return statistics.median(r["server"][key] for r in rows)
 
-        walls = [r["wall_s"] for r in rows]
-        print(
-            f"{case['id']:<5}{case['total_chunks']:>7}{percentile(walls, 50):>10.1f}{max(walls):>8.1f}"
-            f"{med('parse_images_s'):>8.1f}{med('rule_analyze_s'):>7.2f}{med('price_check_s'):>7.2f}"
-            f"{med('vision_latency_sum_s'):>9.1f}{med('input_tokens'):>9.0f}{med('output_tokens'):>9.0f}"
-            f"{statistics.median(r['cost_usd'] for r in rows):>9.4f}"
-        )
+def _print_row(label: str, total_chunks: int, rows: list[dict]) -> None:
+    def med(key: str) -> float:
+        return statistics.median(r["server"][key] for r in rows)
+
+    walls = [r["wall_s"] for r in rows]
+    print(
+        f"{label:<5}{total_chunks:>7}{percentile(walls, 50):>10.1f}{max(walls):>8.1f}"
+        f"{med('parse_images_s'):>8.1f}{med('rule_analyze_s'):>7.2f}{med('price_check_s'):>7.2f}"
+        f"{med('vision_latency_sum_s'):>9.1f}{med('input_tokens'):>9.0f}{med('output_tokens'):>9.0f}"
+        f"{statistics.median(r['cost_usd'] for r in rows):>9.4f}  (n={len(rows)})"
+    )
 
 
 def main() -> None:
@@ -148,7 +156,11 @@ def main() -> None:
             if capture and result.get("request_id"):
                 result["parsed"] = _fetch_capture(client, result["request_id"], digests[case["id"]])
                 parsed = result["parsed"]
-                if parsed and (parsed["unmatched_calls"] or len(parsed["vision_calls"]) != case["total_chunks"]):
+                # 파싱 캐시가 켜진 서버에서 호출 0개는 캐시 히트라 정상 (서버 로그의 parse_cache_hits로 확인)
+                cache_hit = info.get("parse_cache") and not parsed["vision_calls"] if parsed else False
+                if parsed and not cache_hit and (
+                    parsed["unmatched_calls"] or len(parsed["vision_calls"]) != case["total_chunks"]
+                ):
                     print(f"  [WARN] 캡처된 호출 {len(parsed['vision_calls'])}개 / 청크 {case['total_chunks']}개, "
                           f"매칭 실패 {parsed['unmatched_calls']}개")
             requests.append({"case_id": case["id"], "warmup": warmup, "run_index": run_index, **result})
@@ -170,6 +182,10 @@ def main() -> None:
             r["signature"] = {"line_item_count": server and server["line_item_count"], **result_signature(body)}
             if r.get("parsed"):
                 r["signature"].update(parse_metrics(r["parsed"]["line_items"], r["parsed"]["vision_calls"]))
+                if server and server.get("parse_cache_hits"):
+                    # total_cost는 청크별 원본 모델 출력에서 뽑는데, 캐시 히트엔 모델 호출이 없다(캐시는 line_items만
+                    # 저장). 0으로 두면 미스 실행과 "다르다"고 잘못 판정되므로 비교 대상에서 뺀다.
+                    r["signature"]["total_cost"] = None
             snapshots.setdefault(r["case_id"], r["signature"])
 
     missing = [r["request_id"] for r in requests if r["status"] == 200 and not r["server"]]

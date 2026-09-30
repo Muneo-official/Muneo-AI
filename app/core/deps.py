@@ -13,6 +13,7 @@ from app.repositories.coefficient_repository import CoefficientRepository
 from app.repositories.estimate_repository import EstimateRepository
 from app.repositories.feedback_repository import FeedbackRepository
 from app.repositories.pending_estimate_repository import PendingEstimateRepository
+from app.repositories.risk_parse_cache_repository import RiskParseCacheRepository
 from app.repositories.risk_report_repository import RiskReportRepository
 
 
@@ -64,10 +65,16 @@ async def lifespan(app: FastAPI):
     app.state.risk_report_repository = RiskReportRepository(
         collection=mongo_client[settings.mongo_db_name]["risk_reports"],
     )
+    parse_cache = (
+        RiskParseCacheRepository(collection=mongo_client[settings.mongo_db_name]["risk_parse_cache"])
+        if settings.risk_parse_cache_enabled
+        else None
+    )
     app.state.risk_detector_service = RiskDetectorService(
         engine=app.state.engine,
         vision_max_concurrency=settings.risk_vision_max_concurrency,
         vision_max_concurrency_per_request=settings.risk_vision_max_concurrency_per_request,
+        parse_cache=parse_cache,
     )
 
     yield
