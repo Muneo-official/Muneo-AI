@@ -729,10 +729,12 @@ class EstimateEngine:
 
             for 공종 in 공종들 + ["철거"]:
                 keys = 욕실_keys if 공종 == "욕실" else 공종_TO_COST.get(공종, [])
-                for cost_key in keys:
-                    val = int(case.get(cost_key) or 0)
-                    if val > 0:
-                        cat_costs[공종].append(val)
+                # 키가 여러 개인 공종(욕실)은 사례별 합 하나만 넣는다. 키마다 따로 넣으면 중앙값이
+                # 세 부분의 합이 아니라 부분 하나의 크기가 돼, 실제 견적 대비 2배 넘게 낮게 나왔다.
+                # 같은 욕실 공사가 사례마다 욕실·설비·타일에 다르게 나뉘어 있어 있는 값만 더한다.
+                val = sum(int(case.get(cost_key) or 0) for cost_key in keys)
+                if val > 0:
+                    cat_costs[공종].append(val)
 
         return total_costs, cat_costs
 
