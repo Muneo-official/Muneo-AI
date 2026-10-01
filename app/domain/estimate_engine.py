@@ -24,7 +24,7 @@ from app.repositories.case_repository import CaseRepository
 # 설정
 # ══════════════════════════════════════════════════════
 
-ENGINE_VERSION     = "1.0.0"  # 저장된 견적의 재현성 추적용 (estimates.engine_version)
+ENGINE_VERSION     = "1.1.0"  # 저장된 견적의 재현성 추적용 (estimates.engine_version)
 TOP_K              = 15   # 최종 유사 사례 수 (리랭킹 이후)
 RERANK_POOL        = 20   # RRF 결합 이후, cross-encoder에 넣을 후보 수
 CASE_TEXT_REQUEST_CAP = 60  # _case_text()의 요청글 트렁케이션 길이. 캡이 넉넉할수록(예: 300)
@@ -729,10 +729,12 @@ class EstimateEngine:
 
             for 공종 in 공종들 + ["철거"]:
                 keys = 욕실_keys if 공종 == "욕실" else 공종_TO_COST.get(공종, [])
-                for cost_key in keys:
-                    val = int(case.get(cost_key) or 0)
-                    if val > 0:
-                        cat_costs[공종].append(val)
+                # 키가 여러 개인 공종(욕실)은 사례별 합 하나만 넣는다. 키마다 따로 넣으면 중앙값이
+                # 세 부분의 합이 아니라 부분 하나의 크기가 돼, 실제 견적 대비 2배 넘게 낮게 나왔다.
+                # 같은 욕실 공사가 사례마다 욕실·설비·타일에 다르게 나뉘어 있어 있는 값만 더한다.
+                val = sum(int(case.get(cost_key) or 0) for cost_key in keys)
+                if val > 0:
+                    cat_costs[공종].append(val)
 
         return total_costs, cat_costs
 
