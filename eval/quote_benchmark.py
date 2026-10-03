@@ -15,6 +15,7 @@ eval/quote_benchmark.py — 가견적 채점: 정답셋의 입력으로 엔진�
   - 총액은 간접비 포함 기준과 직접비 기준 두 가지로 채점한다 — 코퍼스의 total_cost에 간접비 포함 여부가 섞여 있다
   - 전체 시공과 부분 시공은 총액 산출 경로가 달라 나눠서 보고, 플래그가 붙은 건을 뺀 값도 함께 낸다
   - 구간은 정답 레코드 단위 부트스트랩 95%
+  - 엔진이 견적을 못 낸 건은 적중률에서 '벗어남'으로 센다 — 빼고 세면 어려운 건을 실패시키는 변경이 개선처럼 보인다
 
 건별 결과는 커밋하지 않는 위치(estimate_data/_gt_review/benchmark_runs/)에 저장한다.
 """
@@ -25,15 +26,17 @@ import datetime
 import json
 import random
 import statistics
+import sys
 
 from dotenv import load_dotenv
 from motor.motor_asyncio import AsyncIOMotorClient
 from sentence_transformers import CrossEncoder, SentenceTransformer
 
 from app.core.config import get_settings
-from app.domain.estimate_engine import EstimateEngine
+from app.domain.estimate_engine import ENGINE_VERSION, EstimateEngine
 from app.repositories.case_repository import CaseRepository
 from app.repositories.coefficient_repository import CoefficientRepository
+from app.schemas.estimate import EstimateRequest
 from eval.quote_ground_truth import GROUND_TRUTH_PATH, REVIEW_DIR, 공종_순서
 
 load_dotenv()
@@ -47,36 +50,42 @@ BOOTSTRAP_SEED = 68
 class LeaveOutCaseRepository(CaseRepository):
     """채점 중인 정답 견적과 같은 의뢰의 사례를 검색 결과에서 빼는 CaseRepository.
 
-    서비스 코드는 건드리지 않고 엔진에 주입하는 저장소만 바꾼다. 뺀 만큼 후보 풀이 줄지 않도록
-    그 의뢰에 달린 사례 수만큼 더 가져온 뒤 잘라낸다.
+    서비스 코드는 건드리지 않고 엔진에 주입하는 저장소만 바꾼다. 그 사례들이 코퍼스에 없을 때 서비스가
+    돌려줄 결과와 같아야 하므로, CaseRepository.vector_search()의 파이프라인을 순서만 바꿔 다시 쓴다 —
+    빠질 건수만큼 더 가져와 먼저 빼고, limit으로 자른 다음에 비주거 사례를 거른다. 비주거를 먼저 거르면
+    그 빈자리가 서비스에는 없는 후순위 사례로 채워진다.
     """
 
     def __init__(self, collection, settings):
         super().__init__(collection, settings)
-        self._left_out_url: str | None = None
-        self._left_out_article: str | None = None
-        self._extra = 0
+        self.left_out_ids: set[str] = set()
 
     async def leave_out(self, request_url: str | None, article_id: str | None) -> int:
         """이후 검색에서 뺄 의뢰를 정한다. 반환: 코퍼스에서 빠지는 사례 수."""
-        self._left_out_url = request_url or None
-        self._left_out_article = str(article_id) if article_id else None
         conds = []
-        if self._left_out_url:
-            conds.append({"request_url": self._left_out_url})
-        if self._left_out_article:
-            conds.append({"article_id": self._left_out_article})
-        self._extra = await self._collection.count_documents({"$or": conds}) if conds else 0
-        return self._extra
-
-    def _is_left_out(self, case: dict) -> bool:
-        if self._left_out_url and case.get("request_url") == self._left_out_url:
-            return True
-        return bool(self._left_out_article) and str(case.get("article_id")) == self._left_out_article
+        if request_url:
+            conds.append({"request_url": request_url})
+        if article_id:
+            conds.append({"article_id": str(article_id)})
+        self.left_out_ids = set()
+        if conds:
+            cursor = self._collection.find({"$or": conds}, {"article_id": 1, "_id": 0})
+            self.left_out_ids = {str(doc["article_id"]) async for doc in cursor}
+        return len(self.left_out_ids)
 
     async def vector_search(self, query_embedding, mongo_filter, limit, num_candidates=150):
-        cases = await super().vector_search(query_embedding, mongo_filter, limit + self._extra, num_candidates)
-        return [c for c in cases if not self._is_left_out(c)][:limit]
+        stage: dict = {
+            "index": self._index_name,
+            "path": "embedding",
+            "queryVector": query_embedding,
+            "numCandidates": num_candidates,
+            "limit": limit + len(self.left_out_ids),
+        }
+        if mongo_filter:
+            stage["filter"] = mongo_filter
+        cursor = self._collection.aggregate([{"$vectorSearch": stage}, {"$project": {"embedding": 0}}])
+        ranked = [doc async for doc in cursor if str(doc.get("article_id")) not in self.left_out_ids]
+        return [doc for doc in ranked[:limit] if doc.get("is_non_residential") is not True]
 
 
 # ── 채점 (순수 계산) ──────────────────────────────────────────────────────
@@ -96,15 +105,16 @@ def score_range(rng: dict | None, truth: int) -> dict | None:
 
 def score_record(record: dict, output: dict) -> dict:
     """정답 레코드 하나와 엔진 출력 하나를 채점한다. 엔진이 견적을 못 냈으면 실패로 남긴다."""
+    truth = record["truth"]
     row = {
         "id": record["id"],
         "시공범위": record["input"]["시공범위"],
         "flags": list(record["flags"]),
     }
     if "error" in output:
-        return {**row, "실패": output["error"]}
+        # 공종별 적중률에서도 '벗어남'으로 세려면 어떤 공종이 정답에 있었는지 남겨야 한다
+        return {**row, "실패": output["error"], "공종": list(truth["공종별"])}
 
-    truth = record["truth"]
     총범위 = output["총_견적_범위"]
     공종별_범위 = output["공종별_단가_범위"]
     return {
@@ -126,14 +136,18 @@ def bootstrap_ci(values: list[float], stat, n: int = BOOTSTRAP_N, seed: int = BO
     return stats[int(n * 0.025)], stats[min(int(n * 0.975), n - 1)]
 
 
-def summarize_scores(scores: list[dict | None]) -> dict:
-    """score_range() 결과 여러 개를 한 줄 요약으로. None(미산출)은 건수만 세고 지표에서 뺀다."""
+def summarize_scores(scores: list[dict | None], failed: int = 0) -> dict:
+    """score_range() 결과 여러 개를 한 줄 요약으로.
+
+    None(미산출)은 건수만 세고 지표에서 뺀다. failed는 엔진이 견적 자체를 못 낸 건수로, 오차율과 폭은
+    구할 수 없으니 빼고 적중률에서만 '벗어남'으로 센다.
+    """
     scored = [s for s in scores if s is not None]
-    summary = {"건수": len(scored), "미산출": len(scores) - len(scored)}
+    summary = {"건수": len(scored), "미산출": len(scores) - len(scored), "실패": failed}
     if not scored:
         return summary
     abs_err = [abs(s["오차율"]) for s in scored]
-    hits = [1.0 if s["적중"] else 0.0 for s in scored]
+    hits = [1.0 if s["적중"] else 0.0 for s in scored] + [0.0] * failed
     widths = [s["폭"] for s in scored if s["폭"] is not None]
     summary.update({
         "절대오차율_중앙값": statistics.median(abs_err),
@@ -149,20 +163,33 @@ def summarize_scores(scores: list[dict | None]) -> dict:
 
 def summarize(rows: list[dict]) -> dict:
     """건별 채점 결과를 묶음별(전체, 시공범위별, 플래그 없는 건)·공종별로 요약한다."""
-    ok = [r for r in rows if "실패" not in r]
     groups = {
-        "전체": ok,
-        "전체 시공": [r for r in ok if r["시공범위"] == "전체"],
-        "부분 시공": [r for r in ok if r["시공범위"] == "부분"],
-        "플래그 없는 건": [r for r in ok if not r["flags"]],
+        "전체": rows,
+        "전체 시공": [r for r in rows if r["시공범위"] == "전체"],
+        "부분 시공": [r for r in rows if r["시공범위"] == "부분"],
+        "플래그 없는 건": [r for r in rows if not r["flags"]],
     }
+    ok = [r for r in rows if "실패" not in r]
+    failed = [r for r in rows if "실패" in r]
+
+    def by_group(key: str) -> dict:
+        return {
+            name: summarize_scores([r[key] for r in group if "실패" not in r],
+                                   failed=sum(1 for r in group if "실패" in r))
+            for name, group in groups.items()
+        }
+
+    def has_공종(row: dict, g: str) -> bool:
+        return g in (row["공종"] if "실패" in row else row["공종별"])
+
     return {
-        "실패": [r["id"] for r in rows if "실패" in r],
-        "총액": {name: summarize_scores([r["총액"] for r in group]) for name, group in groups.items()},
-        "직접비": {name: summarize_scores([r["직접비"] for r in group]) for name, group in groups.items()},
+        "실패": [r["id"] for r in failed],
+        "총액": by_group("총액"),
+        "직접비": by_group("직접비"),
         "공종별": {
-            g: summarize_scores([r["공종별"][g] for r in ok if g in r["공종별"]])
-            for g in 공종_순서 if any(g in r["공종별"] for r in ok)
+            g: summarize_scores([r["공종별"][g] for r in ok if g in r["공종별"]],
+                                failed=sum(1 for r in failed if g in r["공종"]))
+            for g in 공종_순서 if any(has_공종(r, g) for r in rows)
         },
     }
 
@@ -182,11 +209,12 @@ def _ci(interval: tuple[float, float] | None) -> str:
 
 def _summary_line(name: str, s: dict) -> str:
     if not s["건수"]:
-        return f"  {name:<10} 채점 0건, 미산출 {s['미산출']}건"
+        return f"  {name:<10} 채점 0건, 미산출 {s['미산출']}건, 실패 {s['실패']}건"
     line = (f"  {name:<10} n={s['건수']:<3} 절대오차율 {_pct(s['절대오차율_중앙값'])} {_ci(s['절대오차율_구간'])}  "
             f"과대 {s['과대']}·과소 {s['과소']}  적중률 {_pct(s['적중률'])} {_ci(s['적중률_구간'])}  "
             f"폭 {_pct(s['폭_중앙값'])}")
-    return line + (f"  미산출 {s['미산출']}" if s["미산출"] else "")
+    line += f"  미산출 {s['미산출']}" if s["미산출"] else ""
+    return line + (f"  실패 {s['실패']}(벗어남으로 셈)" if s["실패"] else "")
 
 
 def print_report(rows: list[dict], summary: dict) -> None:
@@ -198,6 +226,9 @@ def print_report(rows: list[dict], summary: dict) -> None:
         cells = []
         for key in ("총액", "직접비"):
             s = r[key]
+            if s is None:  # 비교할 정답 금액이 0 이하인 건
+                cells.append("채점 불가")
+                continue
             cells.append(f"{_pct(s['오차율'], signed=True):>5} {'적중' if s['적중'] else '벗어남':<4} 폭 {_pct(s['폭']):<6}")
         print(f"{r['id']:<8}{r['시공범위']:<5}{r['참고_사례_수']:>4}  {cells[0]:<22}{cells[1]:<22}{','.join(r['flags'])}")
 
@@ -209,10 +240,8 @@ def print_report(rows: list[dict], summary: dict) -> None:
     for g, s in summary["공종별"].items():
         print(_summary_line(g, s))
 
-    전체 = summary["총액"]["전체"]
-    if 전체["건수"]:
-        print(f"\n범위 적중률 목표 {TARGET_HIT_RATE:.0%} / 실제 {_pct(전체['적중률'])} (간접비 포함), "
-              f"{_pct(summary['직접비']['전체']['적중률'])} (직접비)")
+    print(f"\n범위 적중률 목표 {TARGET_HIT_RATE:.0%} / 실제 {_pct(summary['총액']['전체'].get('적중률'))} (간접비 포함), "
+          f"{_pct(summary['직접비']['전체'].get('적중률'))} (직접비)")
     if summary["실패"]:
         print(f"견적을 못 낸 건: {summary['실패']}")
 
@@ -226,9 +255,14 @@ async def run(split: str) -> None:
     if not records:
         raise SystemExit(f"검수 완료된 {split} 레코드가 없습니다")
 
-    # app/core/deps.py의 lifespan과 같은 구성 — 서비스와 다른 설정으로 채점하면 의미가 없다
+    # app/core/deps.py의 lifespan과 같은 구성 — 서비스와 다른 설정으로 채점하면 의미가 없다.
+    # lifespan에 엔진 인자나 설정이 추가되면 여기도 같이 고친다
     settings = get_settings()
-    client = AsyncIOMotorClient(settings.mongo_uri)
+    client = AsyncIOMotorClient(
+        settings.mongo_uri,
+        maxPoolSize=settings.mongo_max_pool_size,
+        serverSelectionTimeoutMS=settings.mongo_server_selection_timeout_ms,
+    )
     db = client[settings.mongo_db_name]
     repo = LeaveOutCaseRepository(db["estimate_cases"], settings)
     embedder = SentenceTransformer(settings.embed_model)
@@ -243,10 +277,12 @@ async def run(split: str) -> None:
     for record in records:
         source = record["source"]
         left_out = await repo.leave_out(source.get("request_url"), source.get("article_id"))
-        output = await engine.generate(dict(record["input"]))
-        leaked = str(source.get("article_id")) in output.get("reference_case_ids", [])
+        # 라우터와 같은 경로로 입력을 만든다 — 스키마의 기본값·정규화를 거친 값이 엔진에 들어간다
+        inp = EstimateRequest(**record["input"]).model_dump(exclude_none=True)
+        output = await engine.generate(inp)
+        leaked = sorted(repo.left_out_ids & set(output.get("reference_case_ids", [])))
         if leaked:
-            raise SystemExit(f"{record['id']}: 정답 견적이 참고 사례에 들어갔습니다 — 제외가 동작하지 않음")
+            raise SystemExit(f"{record['id']}: 제외한 사례가 참고 사례에 들어갔습니다 {leaked} — 제외가 동작하지 않음")
         row = score_record(record, output)
         rows.append(row)
         details.append({**row, "제외된_사례_수": left_out, "output": {
@@ -255,17 +291,21 @@ async def run(split: str) -> None:
     client.close()
 
     summary = summarize(rows)
-    print_report(rows, summary)
-
+    # 출력 중에 문제가 생겨도 결과가 남도록 먼저 저장한다
     RUNS_DIR.mkdir(parents=True, exist_ok=True)
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     path = RUNS_DIR / f"{split}_{stamp}.json"
     path.write_text(json.dumps({
-        "split": split, "run_at": stamp, "engine_version": output.get("engine_version"),
-        "coefficient_version": output.get("coefficient_version"), "use_reranker": settings.use_reranker,
+        "split": split, "run_at": stamp, "engine_version": ENGINE_VERSION,
+        "coefficient_version": coefficients.get("version", "default"), "use_reranker": settings.use_reranker,
         "vector_candidate_pool": settings.vector_candidate_pool,
         "summary": summary, "records": details,
     }, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    print_report(rows, summary)
+    no_source = [r["id"] for r in records if not (r["source"].get("request_url") or r["source"].get("article_id"))]
+    if no_source:
+        print(f"출처 정보가 없어 제외를 걸지 못한 건: {no_source} — 코퍼스에 없는 견적인지 따로 확인해야 한다")
     print(f"\n[OK] {len(rows)}건 채점 → {path}")
 
 
@@ -277,6 +317,7 @@ def main() -> None:
     # 평가용 세트 결과를 보면서 엔진을 고치면 세트를 나눈 의미가 없어진다. 실수로 돌리지 않게 막는다
     if args.split == "eval" and not args.final:
         parser.error("평가용 세트는 마지막 비교 때만 실행합니다. 정말 실행하려면 --final")
+    sys.stdout.reconfigure(encoding="utf-8")  # 출력을 파일로 돌리면 Windows 기본 인코딩(cp949)이라 '—'에서 멈춘다
     asyncio.run(run(args.split))
 
 
