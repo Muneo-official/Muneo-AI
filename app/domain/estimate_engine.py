@@ -24,7 +24,7 @@ from app.repositories.case_repository import CaseRepository
 # 설정
 # ══════════════════════════════════════════════════════
 
-ENGINE_VERSION     = "1.1.0"  # 저장된 견적의 재현성 추적용 (estimates.engine_version)
+ENGINE_VERSION     = "1.2.0"  # 저장된 견적의 재현성 추적용 (estimates.engine_version)
 TOP_K              = 15   # 최종 유사 사례 수 (리랭킹 이후)
 RERANK_POOL        = 20   # RRF 결합 이후, cross-encoder에 넣을 후보 수
 CASE_TEXT_REQUEST_CAP = 60  # _case_text()의 요청글 트렁케이션 길이. 캡이 넉넉할수록(예: 300)
@@ -370,6 +370,16 @@ def _margin_scale(n_cases: int) -> tuple[float, float]:
     if n_cases >= 5:
         return 1.0, 1.0
     return 1.2, 1.2
+
+
+def _total_range(mid: int, lo_margin: float, hi_margin: float, n_cases: int) -> tuple[int, int]:
+    """총액의 (최소, 최대). 중간값에서 아래로 lo_margin, 위로 hi_margin만큼 — 사례 수에 따라 축소한다.
+
+    범위는 위로 더 넓다. 코퍼스의 total_cost는 이윤·보험료가 빠진 공사비로 저장된 건이 많아 실제 견적이
+    참고 사례보다 높게 나오는 쪽이 흔하다. 중간값은 이 범위의 중점이 아니라 호출하는 쪽이 넘긴 값 그대로다.
+    """
+    lo_scale, hi_scale = _margin_scale(n_cases)
+    return int(mid * (1 - lo_margin * lo_scale)), int(mid * (1 + hi_margin * hi_scale))
 
 
 도배_범위_비율: dict[str, float] = {
@@ -790,9 +800,6 @@ class EstimateEngine:
             "마감/공과잡비" in inp.get("공종", []) or
             inp.get("시공범위") == "전체"
         )
-        if 마감비율_적용:
-            notes.append(f"마감/공과잡비 포함 (총 공사비의 {self._coeff('finishing_ratio'):.0%})")
-
         return factor, notes, 양중 + 철거추가, 마감비율_적용
 
     # ── 5. 공종별 개별 보정계수 계산 ────────────────────────
@@ -930,40 +937,42 @@ class EstimateEngine:
                     "최대": int(r["최대"] * factor),
                 }
 
-        마감_lo = 마감_hi = 0
-        마감_비율 = self._coeff("finishing_ratio")
-
-        ms_lo, ms_hi = _margin_scale(len(cases))
-        if inp.get("시공범위") == "전체" and total_costs:
+        # 총액의 "중간"은 참고 사례의 중앙값(보정 반영)이다. 범위의 중점으로 계산하지 않는다 —
+        # 범위가 위로 더 넓어서, 중점을 쓰면 중간값이 참고 사례 중앙값보다 항상 높게 나온다.
+        if 시공범위 == "전체":
             r = self.cost_range(total_costs)
-            adj_mid_raw = int(r["중간"] * factor) + extra
-            adj_lo = int(adj_mid_raw * (1 - 전체_LO_MARGIN * ms_lo))
-            adj_hi = int(adj_mid_raw * (1 + 전체_HI_MARGIN * ms_hi))
-            if 마감비율_적용:
-                마감_lo = int(adj_lo * 마감_비율)
-                마감_hi = int(adj_hi * 마감_비율)
-                adj_lo = int(adj_lo * (1 + 마감_비율))
-                adj_hi = int(adj_hi * (1 + 마감_비율))
+            adj_mid = int(r["중간"] * factor) + extra
+            adj_lo, adj_hi = _total_range(adj_mid, 전체_LO_MARGIN, 전체_HI_MARGIN, len(cases))
+            마감_가산 = False
         elif 공종별_범위:
-            adj_mid_raw = sum(r["중간"] for r in 공종별_범위.values()) + extra
-            adj_lo = int(adj_mid_raw * (1 - 부분_LO_MARGIN * ms_lo))
-            adj_hi = int(adj_mid_raw * (1 + 부분_HI_MARGIN * ms_hi))
-            if 마감비율_적용:
-                마감_lo = int(adj_lo * 마감_비율)
-                마감_hi = int(adj_hi * 마감_비율)
-                adj_lo = int(adj_lo * (1 + 마감_비율))
-                adj_hi = int(adj_hi * (1 + 마감_비율))
+            adj_mid = sum(r["중간"] for r in 공종별_범위.values()) + extra
+            adj_lo, adj_hi = _total_range(adj_mid, 부분_LO_MARGIN, 부분_HI_MARGIN, len(cases))
+            마감_가산 = True
         else:
             r = self.cost_range(total_costs)
             adj_lo = int(r["최소"] * factor) + extra
+            adj_mid = int(r["중간"] * factor) + extra
             adj_hi = int(r["최대"] * factor) + extra
-            if 마감비율_적용:
-                마감_lo = int(adj_lo * 마감_비율)
-                마감_hi = int(adj_hi * 마감_비율)
-                adj_lo = int(adj_lo * (1 + 마감_비율))
-                adj_hi = int(adj_hi * (1 + 마감_비율))
+            마감_가산 = False
 
-        adj_mid = (adj_lo + adj_hi) // 2
+        # 마감/공과잡비: 사례 총금액에서 구한 총액에는 견적서의 기타공사가 대부분 들어 있어(코퍼스에서
+        # 확인 가능한 사례의 약 3분의 2) 또 더하지 않고 총액 안의 몫으로만 표시한다. 공종 중간값의 합으로
+        # 구한 총액에는 마감이 없으므로 더한다.
+        마감_범위 = None
+        if 마감비율_적용:
+            마감_비율 = self._coeff("finishing_ratio")
+            마감_범위 = {
+                "최소": int(adj_lo * 마감_비율),
+                "중간": int(adj_mid * 마감_비율),
+                "최대": int(adj_hi * 마감_비율),
+            }
+            if 마감_가산:
+                adj_lo = int(adj_lo * (1 + 마감_비율))
+                adj_mid = int(adj_mid * (1 + 마감_비율))
+                adj_hi = int(adj_hi * (1 + 마감_비율))
+                notes.append(f"마감/공과잡비 포함 (총 공사비의 {마감_비율:.0%})")
+            else:
+                notes.append(f"마감/공과잡비는 총액에 포함된 금액 중 약 {마감_비율:.0%}로 표시")
 
         def _cost_per_pyeong(c: dict) -> int:
             # cost_per_pyeong은 ingest 시점에 미리 계산해 저장한 필드라, size_pyeong이
@@ -991,12 +1000,8 @@ class EstimateEngine:
 
         공종별_항목_명세 = await self.collect_line_items(cases, 추출대상_공종들)
 
-        if 마감비율_적용 and 마감_hi > 0:
-            공종별_범위["마감/공과잡비"] = {
-                "최소": 마감_lo,
-                "중간": (마감_lo + 마감_hi) // 2,
-                "최대": 마감_hi,
-            }
+        if 마감_범위 and 마감_범위["최대"] > 0:
+            공종별_범위["마감/공과잡비"] = 마감_범위
             평수 = int(inp.get("평수") or 30)
             철거포함 = "철거" in 공종들
             엘베있음 = inp.get("엘리베이터") != "없음"
