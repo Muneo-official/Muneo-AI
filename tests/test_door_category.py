@@ -62,3 +62,43 @@ def test_도어는_창호와_한_공종으로_세어_전체_부분_판정이_달
 def test_요청_스키마가_도어_공종을_받는다():
     request = EstimateRequest(공종=["창호", "도어", "목공"], 평수=30)
     assert "도어" in request.공종
+
+
+class _Repo:
+    def __init__(self, docs):
+        self._docs = docs
+
+    async def find_by_article_ids(self, article_ids):
+        return self._docs
+
+
+def _spec_engine(line_items_by_case: dict[str, list[dict]]) -> tuple[EstimateEngine, list[dict]]:
+    docs = {aid: {"parsed_estimate": {"line_items": items}} for aid, items in line_items_by_case.items()}
+    cases = [{"article_id": aid} for aid in line_items_by_case]
+    return EstimateEngine(case_repository=_Repo(docs), embedder=None, reranker=None), cases
+
+
+async def test_품목_명세의_도어는_원래_공종의_품명_정리_규칙을_쓴다():
+    # 현관중문 3연동(엣지)·초슬림 3연동 중문처럼 표기가 달라도 "중문" 한 줄로 묶여야 명세에 나온다
+    engine, cases = _spec_engine({
+        "1": [{"category": "창호공사", "description": "현관중문 3연동(엣지)", "amount": 1_100_000}],
+        "2": [{"category": "창호공사", "description": "초슬림 3연동 중문", "amount": 1_200_000}],
+    })
+    spec = await engine.collect_line_items(cases, ["도어"])
+    assert [row["등장_사례_수"] for row in spec["도어"]] == [2]
+
+
+async def test_품목의_공종이_비어_있어도_명세를_낸다():
+    engine, cases = _spec_engine({
+        "1": [{"category": None, "description": "기타", "amount": 100_000},
+              {"category": "창호공사", "description": "현관중문 3연동", "amount": 1_100_000}],
+        "2": [{"category": "창호공사", "description": "현관중문 3연동", "amount": 1_200_000}],
+    })
+    spec = await engine.collect_line_items(cases, ["도어"])
+    assert len(spec["도어"]) == 1
+
+
+def test_도어_요청은_창호_플래그로_사례를_찾는다():
+    # 도어 전용 플래그는 없다. has_창호의 키워드에 도어·현관문이 들어 있다
+    conds = _engine()._build_filter(30, ["서울"], ["도어"], use_size=False, use_region=False)
+    assert conds == {"has_창호": {"$eq": "true"}}

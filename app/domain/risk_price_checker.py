@@ -83,6 +83,17 @@ def _price_range(values: list[int]) -> dict[str, int] | None:
     return {"최소": lo, "최대": hi, "중간": mid}
 
 
+def _cases_split_doors(cases: list[dict[str, Any]]) -> bool:
+    """참고 사례가 전부 도어를 분리한 기준으로 집계돼 있는지.
+
+    cost_도어 필드는 그 기준으로 집계된 사례에만 있다(도어가 없으면 0으로 들어간다). 새로 수집된 사례에만
+    이 필드가 있고 나머지는 재집계 전인 상태에서는 기준이 섞여 있으므로, 전부 분리된 경우에만 견적서도
+    분리한다. 금액 필드가 아예 없는 사례(파싱 결과가 없는 사례)는 판단에서 뺀다.
+    """
+    priced = [c for c in cases if any(k.startswith("cost_") and k != "cost_per_pyeong" for k in c)]
+    return bool(priced) and all("cost_도어" in c for c in priced)
+
+
 def _sum_amount_by_category(line_items: list[dict[str, Any]], split_doors: bool) -> dict[str, int]:
     """견적서 품목을 공종별로 더한다.
 
@@ -120,14 +131,15 @@ async def check_price_anomalies(
     engine: EstimateEngine,
 ) -> list[RiskIssue]:
     """카테고리별 line_item 합산 금액을 유사 사례 가격 범위(P10~P90)와 비교해 이상 항목을 찾는다."""
-    if not _sum_amount_by_category(line_items, split_doors=False):
+    amounts_by_category = _sum_amount_by_category(line_items, split_doors=False)
+    if not amounts_by_category:
         return []
 
     inp = _build_engine_input(command)
     query = engine.build_query(inp)
     cases = await engine.retrieve_cases(query, inp)
-    # cost_도어 필드는 도어를 분리한 기준으로 집계된 사례에만 있다(없는 도어는 0으로 들어간다)
-    amounts_by_category = _sum_amount_by_category(line_items, split_doors=any("cost_도어" in c for c in cases))
+    if _cases_split_doors(cases):
+        amounts_by_category = _sum_amount_by_category(line_items, split_doors=True)
 
     if len(cases) < MIN_COMPARABLE_CASES:
         log_event(

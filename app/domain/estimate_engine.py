@@ -19,7 +19,7 @@ from starlette.concurrency import run_in_threadpool
 
 from app.core.logging import log_event
 from app.repositories.case_repository import CaseRepository
-from pipeline.aggregation import DOOR_CATEGORY, is_door_item
+from pipeline.aggregation import DOOR_CATEGORY, DOOR_SOURCE_CATEGORIES, is_door_item
 from pipeline.categories import normalize_category
 
 # ══════════════════════════════════════════════════════
@@ -109,6 +109,7 @@ REGION_MAP = {
     "가구":       "has_가구",
     "전기/조명":  "has_전기",
     "창호":       "has_창호",
+    "도어":       "has_창호",  # has_창호의 키워드에 도어·현관문이 들어 있다. 도어 전용 플래그는 없다
 }
 
 # 사용자 공종 → DB cost_* 키
@@ -586,17 +587,20 @@ class EstimateEngine:
             if not pe:
                 continue
             for item in pe.get("line_items", []):
-                cat = item.get("category", "")
-                # 목공·창호로 분류된 도어 품목은 "도어"로 묶는다 — 금액 집계(cost_도어)와 같은 기준
-                if normalize_category(cat) in ("목공", "창호") and is_door_item(item.get("description", "")):
-                    cat = DOOR_CATEGORY
+                source_cat = item.get("category") or ""
+                # 목공·창호로 분류된 도어 품목은 "도어"로 묶는다. 품명으로 고르는 기준은 금액 집계(cost_도어)와
+                # 같다. 창호의 인건비 같은 일반 품목은 집계에서는 도어 몫을 떼지만 여기서는 원래 공종에 둔다.
+                is_door = (normalize_category(source_cat) in DOOR_SOURCE_CATEGORIES
+                           and is_door_item(item.get("description") or ""))
+                cat = DOOR_CATEGORY if is_door else source_cat
                 if cat not in target_categories:
                     continue
                 amt = int(item.get("amount") or 0)
                 if amt <= 0:
                     continue
-                desc = self._normalize_spec_desc(item.get("description", ""))
-                normalized, was_norm = self._normalize_desc(cat, desc)
+                desc = self._normalize_spec_desc(item.get("description") or "")
+                # 품명 정리 규칙(NORM_MAP)은 견적서의 원래 공종 이름으로 찾는다 — 중문·방문·문틀 규칙이 거기 있다
+                normalized, was_norm = self._normalize_desc(source_cat, desc)
                 if normalized is None:
                     continue
                 amounts[cat][(normalized, was_norm)].append(amt)
