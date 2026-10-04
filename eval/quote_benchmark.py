@@ -274,6 +274,7 @@ async def run(split: str) -> None:
     engine = EstimateEngine(
         case_repository=repo, embedder=embedder, reranker=reranker,
         vector_candidate_pool=settings.vector_candidate_pool, coefficients=coefficients,
+        window_includes_door=settings.estimate_window_includes_door,
     )
 
     rows, details = [], []

@@ -19,12 +19,14 @@ from starlette.concurrency import run_in_threadpool
 
 from app.core.logging import log_event
 from app.repositories.case_repository import CaseRepository
+from pipeline.aggregation import DOOR_CATEGORY, is_door_item
+from pipeline.categories import normalize_category
 
 # ══════════════════════════════════════════════════════
 # 설정
 # ══════════════════════════════════════════════════════
 
-ENGINE_VERSION     = "1.3.0"  # 저장된 견적의 재현성 추적용 (estimates.engine_version)
+ENGINE_VERSION     = "1.4.0"  # 저장된 견적의 재현성 추적용 (estimates.engine_version)
 TOP_K              = 15   # 최종 유사 사례 수 (리랭킹 이후)
 RERANK_POOL        = 20   # RRF 결합 이후, cross-encoder에 넣을 후보 수
 CASE_TEXT_REQUEST_CAP = 60  # _case_text()의 요청글 트렁케이션 길이. 캡이 넉넉할수록(예: 300)
@@ -119,6 +121,7 @@ REGION_MAP = {
     "가구":       ["cost_가구"],
     "철거":       ["cost_철거"],
     "전기/조명":  ["cost_전기"],
+    "도어":       ["cost_도어"],  # 방문·중문·현관문. 목공·창호 품목에서 품명으로 분리해 집계한다(pipeline/aggregation.py)
     "목공":       ["cost_목공"],
     "도장":       ["cost_도장"],
     "설비":       ["cost_설비"],
@@ -141,6 +144,7 @@ REGION_MAP = {
     "철거":       ["철거공사"],
     "창호":       ["창호공사"],
     "필름":       ["필름공사"],
+    "도어":       [DOOR_CATEGORY],  # 견적서의 분류가 아니라 collect_line_items()가 품명으로 골라 묶는 이름이다
 }
 
 공종_EXCLUDE_DESC: dict[str, set] = {
@@ -426,6 +430,7 @@ class EstimateEngine:
         reranker: CrossEncoder | None,  # None이면 cross-encoder 재정렬 없이 RRF 순위를 그대로 쓴다
         vector_candidate_pool: int = 40,
         coefficients: dict | None = None,
+        window_includes_door: bool = True,
     ):
         self._cases = case_repository
         self._embedder = embedder
@@ -433,6 +438,9 @@ class EstimateEngine:
         self._vector_candidate_pool = vector_candidate_pool
         self._coefficients = coefficients or {}
         self._coefficient_version = self._coefficients.get("version", "default")
+        # True면 "창호"만 고른 요청을 샷시 + 도어로 본다(화면에 "도어" 항목이 생기기 전의 뜻). 요청에 "도어"가
+        # 따로 있으면 이 값과 무관하게 "창호"는 샷시만이다.
+        self._window_includes_door = window_includes_door
 
     def _coeff(self, category: str) -> dict | float:
         """버전 관리되는 보정계수 카테고리 조회. DB에 없는 카테고리는 하드코딩 기본값으로 폴백.
@@ -467,7 +475,9 @@ class EstimateEngine:
         for key in {k for keys in 공종_TO_COST.values() for k in keys}:
             if int(case.get(key) or 0) > 0:
                 name = key[len("cost_"):]
-                trades.add("욕실" if name in ("욕실", "타일", "설비") else name)
+                # 욕실·타일·설비는 욕실로, 도어는 창호로 묶는다 — 도어를 따로 세면 공종 수가 늘어 같은 사례의
+                # 전체/부분 판정이 도어를 분리하기 전과 달라진다
+                trades.add("욕실" if name in ("욕실", "타일", "설비") else "창호" if name == "도어" else name)
         return trades
 
     @classmethod
@@ -487,11 +497,19 @@ class EstimateEngine:
             return False
         return cls._is_partial_case({key: 1 for g in 공종들 for key in 공종_TO_COST.get(g, [])})
 
-    @staticmethod
-    def _value_counts(cases: list[dict], 공종들: list[str]) -> dict[str, int]:
+    def _cost_keys(self, 공종: str, 공종들: list[str]) -> list[str]:
+        """이 요청에서 공종의 금액을 읽을 cost_* 키. 키가 여러 개면 사례별로 더한다."""
+        keys = list(공종_TO_COST.get(공종, []))
+        if 공종 == "욕실" and "설비" in 공종들:
+            keys = [k for k in keys if k != "cost_설비"]
+        if 공종 == "창호" and self._window_includes_door and "도어" not in 공종들:
+            keys.append("cost_도어")
+        return keys
+
+    def _value_counts(self, cases: list[dict], 공종들: list[str]) -> dict[str, int]:
         """요청 공종별로, 그 공종의 금액이 있는 사례 수."""
         return {
-            g: sum(1 for c in cases if any(int(c.get(k) or 0) > 0 for k in 공종_TO_COST.get(g, [])))
+            g: sum(1 for c in cases if any(int(c.get(k) or 0) > 0 for k in self._cost_keys(g, 공종들)))
             for g in 공종들
         }
 
@@ -524,9 +542,8 @@ class EstimateEngine:
                   case_count=len(reranked), fallback=False, partial_only=True)
         return reranked
 
-    @staticmethod
-    def _filter_by_scope_coverage(cases: list[dict], 공종들: list[str],
-                                   min_ratio: float = SCOPE_COVERAGE_MIN) -> list[dict]:
+    def _filter_by_scope_coverage(self, cases: list[dict], 공종들: list[str],
+                                  min_ratio: float = SCOPE_COVERAGE_MIN) -> list[dict]:
         def _coverage(case: dict) -> float:
             tc = int(case.get("total_cost") or 0)
             if tc <= 0:
@@ -534,7 +551,7 @@ class EstimateEngine:
             trade_sum = sum(
                 int(case.get(k) or 0)
                 for g in 공종들
-                for k in 공종_TO_COST.get(g, [])
+                for k in self._cost_keys(g, 공종들)
             )
             return trade_sum / tc
 
@@ -542,9 +559,15 @@ class EstimateEngine:
         return filtered if len(filtered) >= 3 else cases
 
     async def collect_line_items(self, cases, 공종들):
+        def spec_categories(공종: str) -> list[str]:
+            cats = list(공종_TO_CATEGORY.get(공종, []))
+            if 공종 == "창호" and "cost_도어" in self._cost_keys(공종, 공종들):
+                cats.append(DOOR_CATEGORY)  # "창호"가 샷시 + 도어를 뜻하는 요청
+            return cats
+
         target_categories: list[str] = []
         for 공종 in 공종들:
-            target_categories.extend(공종_TO_CATEGORY.get(공종, []))
+            target_categories.extend(spec_categories(공종))
 
         if not target_categories:
             return {}
@@ -564,6 +587,9 @@ class EstimateEngine:
                 continue
             for item in pe.get("line_items", []):
                 cat = item.get("category", "")
+                # 목공·창호로 분류된 도어 품목은 "도어"로 묶는다 — 금액 집계(cost_도어)와 같은 기준
+                if normalize_category(cat) in ("목공", "창호") and is_door_item(item.get("description", "")):
+                    cat = DOOR_CATEGORY
                 if cat not in target_categories:
                     continue
                 amt = int(item.get("amount") or 0)
@@ -577,7 +603,7 @@ class EstimateEngine:
 
         result = {}
         for 공종 in 공종들:
-            cats = 공종_TO_CATEGORY.get(공종, [])
+            cats = spec_categories(공종)
             excluded = 공종_EXCLUDE_DESC.get(공종, set())
 
             merged: dict[tuple, list] = defaultdict(list)
@@ -816,17 +842,13 @@ class EstimateEngine:
         total_costs: list[int] = []
         cat_costs: dict[str, list[int]] = defaultdict(list)
 
-        욕실_keys = list(공종_TO_COST.get("욕실", []))
-        if "욕실" in 공종들 and "설비" in 공종들:
-            욕실_keys = [k for k in 욕실_keys if k != "cost_설비"]
-
         for case in cases:
             tc = int(case.get("total_cost") or 0)
             if tc > 0:
                 total_costs.append(tc)
 
             for 공종 in 공종들 + ["철거"]:
-                keys = 욕실_keys if 공종 == "욕실" else 공종_TO_COST.get(공종, [])
+                keys = self._cost_keys(공종, 공종들)
                 # 키가 여러 개인 공종(욕실)은 사례별 합 하나만 넣는다. 키마다 따로 넣으면 중앙값이
                 # 세 부분의 합이 아니라 부분 하나의 크기가 돼, 실제 견적 대비 2배 넘게 낮게 나왔다.
                 # 같은 욕실 공사가 사례마다 욕실·설비·타일에 다르게 나뉘어 있어 있는 값만 더한다.
