@@ -107,8 +107,40 @@ async def test_부분_시공_사례가_충분하지_않으면_전체_사례로_�
     cases = _mixed(PARTIAL_SCOPE_MIN_CASES - 1)
     out, repo = await _generate(cases, "부분", ["도배"])
     assert len(out["reference_case_ids"]) == len(cases)
-    # 부분 시공 사례로 Stage 1~3을 돈 뒤, 기본 후보 풀로 다시 찾는다
-    assert repo.limits == [PARTIAL_SCOPE_POOL] * 3 + [40]
+    # 부분 시공 사례로 한 번 찾아본 뒤, 기본 후보 풀로 다시 찾는다
+    assert repo.limits == [PARTIAL_SCOPE_POOL, 40]
+
+
+async def test_좁힌_뒤_공종_금액이_3건_미만이면_좁히지_않는다():
+    # 부분 시공 사례 8건 중 목공 금액이 있는 건은 2건뿐 — 목공 중간값이 한두 건에 흔들린다
+    partials = [_partial(f"p{i}", **({"cost_목공": 500_000} if i < 2 else {})) for i in range(PARTIAL_SCOPE_MIN_CASES)]
+    cases = [_full("f0"), _full("f1"), _full("f2"), *partials]
+    out, _ = await _generate(cases, "부분", ["도배", "목공"])
+    assert len(out["reference_case_ids"]) == len(cases)
+    assert out["공종별_단가_범위"]["목공"]["중간"] == 4_000_000  # 전체 리모델링 사례의 금액이 들어간다
+
+
+async def test_공종이_없는_요청은_부분_시공_사례로_좁히지_않는다():
+    # 리스크 진단의 가격 비교가 공종 없이 "부분"으로 호출한다. 견적서가 전체 리모델링일 수 있다
+    assert EstimateEngine._is_partial_request([]) is False
+    repo = _Repo(_mixed(PARTIAL_SCOPE_MIN_CASES))
+    engine = EstimateEngine(case_repository=repo, embedder=_Embedder(), reranker=None)
+    cases = await engine.retrieve_cases("30평 서울 리모델링", {"평수": 30, "지역": "서울", "시공범위": "부분", "공종": []})
+    assert repo.limits == [40]
+    assert any(c["article_id"] == "f0" for c in cases)
+
+
+async def test_금액을_내지_않는_설비는_공종_구성_판정에서_뺀다():
+    # 설비는 엔진이 금액을 내지 않는 공종이다. 넣고 세면 욕실이 있는 것으로 보여 전체 리모델링 구성이 된다
+    out, repo = await _generate(_mixed(PARTIAL_SCOPE_MIN_CASES), "부분", ["도배", "마루", "설비", "가구", "전기/조명", "창호"])
+    assert repo.limits[0] == PARTIAL_SCOPE_POOL
+
+
+async def test_단일_공종_안내는_어떤_사례에서_산출했는지에_맞춘다():
+    out, _ = await _generate(_mixed(PARTIAL_SCOPE_MIN_CASES), "부분", ["도배"])
+    assert "부분 시공 사례에서" in out["단독시공_주의"]
+    out, _ = await _generate(_mixed(PARTIAL_SCOPE_MIN_CASES - 1), "부분", ["도배"])
+    assert "전체 리모델링 사례에서" in out["단독시공_주의"]
 
 
 async def test_부분_시공_사례로_좁히면_금액을_못_내는_공종이_생길_때는_좁히지_않는다():

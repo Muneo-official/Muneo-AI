@@ -46,6 +46,8 @@ PARTIAL_SCOPE_POOL = 150  # 부분 시공 요청에서 부분 시공 사례를 �
 FULL_SCOPE_MIN_TRADES = 6  # 도배·바닥·욕실이 모두 있고 공종이 이 수 이상이면 전체 리모델링 사례로 본다
 PARTIAL_SCOPE_MIN_CASES = 8  # 부분 시공 사례가 이 수 이상 모일 때만 그 사례로 좁힌다. 3~4건으로 좁히면 한 건에
                              # 크게 흔들리고 범위도 넓어진다. _margin_scale()이 범위를 줄이기 시작하는 건수와 같다.
+PARTIAL_SCOPE_MIN_VALUES = 3  # 좁힌 뒤에도 요청 공종마다 금액이 이 수 이상 있어야 한다. 사례가 8건이어도 어떤
+                              # 공종의 금액이 1~2건에서만 나오면 그 공종은 한 건에 흔들린다.
 
 # 치수 표기 기호(×/✕/*/+) 정규화: "540*540" → "540×540"
 _DIM_SEP_RE = re.compile(r'(\d+)[×✕\*\+](\d+)')
@@ -476,16 +478,51 @@ class EstimateEngine:
 
     @classmethod
     def _is_partial_request(cls, 공종들: list[str]) -> bool:
-        """요청한 공종 구성이 전체 리모델링이 아닌지. 사례와 같은 기준으로 본다."""
+        """요청한 공종 구성이 전체 리모델링이 아닌지. 사례와 같은 기준으로 본다.
+
+        공종이 없는 요청은 부분 시공 요청이 아니다 — 리스크 진단의 가격 비교가 공종 없이 "부분"으로 호출하는데,
+        견적서가 전체 리모델링일 수 있어 부분 시공 사례로 좁히면 안 된다.
+        """
+        if not 공종들:
+            return False
         return cls._is_partial_case({key: 1 for g in 공종들 for key in 공종_TO_COST.get(g, [])})
 
     @staticmethod
-    def _priced_trades(cases: list[dict], 공종들: list[str]) -> set[str]:
-        """요청 공종 중 사례들에서 금액을 구할 수 있는 공종."""
+    def _value_counts(cases: list[dict], 공종들: list[str]) -> dict[str, int]:
+        """요청 공종별로, 그 공종의 금액이 있는 사례 수."""
         return {
-            g for g in 공종들
-            if any(int(c.get(k) or 0) > 0 for c in cases for k in 공종_TO_COST.get(g, []))
+            g: sum(1 for c in cases if any(int(c.get(k) or 0) > 0 for k in 공종_TO_COST.get(g, [])))
+            for g in 공종들
         }
+
+    async def _retrieve_partial_cases(self, query: str, query_embedding: list[float], mongo_filter: dict | None,
+                                      공종들: list[str], total: int) -> list[dict] | None:
+        """부분 시공 사례만으로 고른 참고 사례. 좁힐 수 없으면 None — 호출하는 쪽이 기존 순서대로 찾는다.
+
+        좁히는 조건 (하나라도 어긋나면 좁히지 않는다)
+          - 부분 시공 사례가 PARTIAL_SCOPE_MIN_CASES건 이상
+          - 최종 사례(TOP_K로 자른 뒤)에서, 후보에 금액이 있던 요청 공종마다 금액이 PARTIAL_SCOPE_MIN_VALUES건
+            이상. 리랭킹 전의 후보로 검사하면 자르는 과정에서 그 공종의 금액이 빠질 수 있다.
+        """
+        pool_n = min(PARTIAL_SCOPE_POOL, total) if total else PARTIAL_SCOPE_POOL
+        try:
+            pool = await self._cases.vector_search(query_embedding, mongo_filter, pool_n)
+            partial = [c for c in pool if self._is_partial_case(c)]
+            if len(partial) < PARTIAL_SCOPE_MIN_CASES:
+                return None
+            reranked = await self._hybrid_rerank(query, partial)
+        except Exception as exc:
+            log_event("retrieve_cases_stage_error", level="warning", stage="partial", error=str(exc))
+            return None
+
+        kept = self._value_counts(reranked, 공종들)
+        thin = [g for g, n in self._value_counts(pool, 공종들).items() if n > 0 and kept[g] < PARTIAL_SCOPE_MIN_VALUES]
+        if thin:
+            log_event("retrieve_cases_partial_skipped", partial_pool_size=len(partial), thin_trades=thin)
+            return None
+        log_event("retrieve_cases", stage=2, pool_size=len(pool), partial_pool_size=len(partial),
+                  case_count=len(reranked), fallback=False, partial_only=True)
+        return reranked
 
     @staticmethod
     def _filter_by_scope_coverage(cases: list[dict], 공종들: list[str],
@@ -719,7 +756,7 @@ class EstimateEngine:
         각 Stage에서 벡터 검색으로 후보 풀(vector_candidate_pool)을 넉넉히 가져온 뒤
         하이브리드 리랭킹으로 최종 TOP_K를 추린다.
 
-        부분 시공 요청은 그 전에 Stage 1~3을 부분 시공 사례만으로 한 번 돈다. 충분히 모이지 않으면
+        부분 시공 요청은 그 전에 같은 지역·평수의 부분 시공 사례만으로 한 번 찾는다. 충분히 모이지 않으면
         위 순서대로(전체 리모델링 사례 포함) 다시 찾는다.
         """
         total = await self._cases.count()
@@ -748,25 +785,14 @@ class EstimateEngine:
         # 부분 시공 요청은 부분 시공 사례만으로 먼저 찾는다. 같은 공종이라도 부분 시공 사례의 금액은 전체
         # 리모델링 사례보다 훨씬 낮다(코퍼스 평당 중앙값 기준 목공·전기·철거는 약 0.35~0.4배, 창호는 약
         # 0.2배). 전체 리모델링 사례가 섞이면 부분 시공 견적이 2~3배 높게 나왔다.
-        # 요청이 "부분"이어도 공종 구성이 전체 리모델링과 같으면(도배·바닥·욕실 포함, 6개 이상) 좁히지 않는다.
-        # 평수 조건이 있는 Stage 1~3에서만 시도한다 — 평수를 풀면 금액 규모가 달라진다. 부분 시공 사례가
-        # PARTIAL_SCOPE_MIN_CASES건 미만이거나, 좁혔을 때 금액을 구할 수 있는 공종이 줄면 그 Stage는
-        # 건너뛴다(빠진 공종만큼 총액이 낮아진다).
-        if inp.get("시공범위", "부분") == "부분" and self._is_partial_request(공종들):
-            partial_pool_n = min(PARTIAL_SCOPE_POOL, total) if total else PARTIAL_SCOPE_POOL
-            for stage, flags in enumerate(stages[:3], start=1):
-                try:
-                    pool = await self._cases.vector_search(query_embedding, stage_filter(flags), partial_pool_n)
-                except Exception as exc:
-                    log_event("retrieve_cases_stage_error", level="warning", stage=stage, error=str(exc))
-                    continue
-                partial = [c for c in pool if self._is_partial_case(c)]
-                if (len(partial) >= PARTIAL_SCOPE_MIN_CASES
-                        and self._priced_trades(partial, 공종들) >= self._priced_trades(pool, 공종들)):
-                    reranked = await self._hybrid_rerank(query, partial)
-                    log_event("retrieve_cases", stage=stage, pool_size=len(pool), partial_pool_size=len(partial),
-                              case_count=len(reranked), fallback=False, partial_only=True)
-                    return reranked
+        산출_공종들 = [g for g in 공종들 if g not in self._UNSUPPORTED_공종 and 공종_TO_COST.get(g)]
+        if inp.get("시공범위", "부분") == "부분" and self._is_partial_request(산출_공종들):
+            # 같은 지역·평수 조건(Stage 2의 필터)으로 한 번만 찾는다. 지역을 풀면 서울 요청이 지방 가격으로
+            # 나온다 — 지역 계수는 "필터가 같은 지역 사례를 가져온다"는 전제로 적용하지 않고 있다.
+            partial = await self._retrieve_partial_cases(query, query_embedding, stage_filter(stages[1]),
+                                                         산출_공종들, total)
+            if partial is not None:
+                return partial
 
         for stage, flags in enumerate(stages, start=1):
             try:
@@ -1138,9 +1164,12 @@ class EstimateEngine:
 
         실공종_수 = len([c for c in 공종들 if c != "마감/공과잡비"])
         if 실공종_수 == 1:
-            output["단독시공_주의"] = (
-                "단일 공종 요청입니다. 전체 리모델링 사례에서 해당 공종 비용을 추출하여 산출했으며, "
-                "단독 시공 시 실제 가격이 5~10% 높을 수 있습니다."
-            )
+            if all(self._is_partial_case(c) for c in cases):
+                output["단독시공_주의"] = "단일 공종 요청입니다. 부분 시공 사례에서 해당 공종 비용을 추출하여 산출했습니다."
+            else:
+                output["단독시공_주의"] = (
+                    "단일 공종 요청입니다. 전체 리모델링 사례에서 해당 공종 비용을 추출하여 산출했으며, "
+                    "단독 시공 시 실제 가격이 5~10% 높을 수 있습니다."
+                )
 
         return output
