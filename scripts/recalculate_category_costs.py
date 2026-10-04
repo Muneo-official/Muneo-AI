@@ -49,7 +49,8 @@ async def main(apply: bool) -> None:
         changed = {
             k: (existing_costs.get(k, 0), v)
             for k, v in new_costs.items()
-            if existing_costs.get(k, 0) != v
+            # 값이 0이어도 필드가 없던 것이면 써야 한다 — cost_도어는 도어가 없는 사례에도 0으로 들어간다
+            if k not in existing_costs or existing_costs[k] != v
         }
 
         if not changed and not to_unset:

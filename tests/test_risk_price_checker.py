@@ -128,3 +128,59 @@ async def test_p10_p90_range_wider_than_p25_p75_reduces_false_positives():
     issues = await check_price_anomalies(_command(), line_items, engine)
 
     assert issues == []
+
+
+# ── 도어 분리 ─────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_도어를_분리해_집계한_사례와는_견적서의_도어도_분리해서_비교한다():
+    # 사례의 창호는 샷시 금액(700만 원대)이다. 견적서의 창호에는 중문만 있다 — 분리하지 않으면
+    # "창호 110만 원이 시세보다 낮음"이 잘못 붙는다
+    cases = [
+        {"cost_창호": 7_000_000, "cost_도어": 1_000_000},
+        {"cost_창호": 7_500_000, "cost_도어": 1_100_000},
+        {"cost_창호": 8_000_000, "cost_도어": 1_200_000},
+        {"cost_창호": 8_500_000, "cost_도어": 1_300_000},
+    ]
+    line_items = [{"category": "창호", "description": "현관중문 3연동", "amount": 1_100_000}]
+
+    issues = await check_price_anomalies(_command(), line_items, _mock_engine(cases=cases))
+
+    assert issues == []
+
+
+@pytest.mark.asyncio
+async def test_도어_금액이_시세를_벗어나면_도어_공종으로_알린다():
+    cases = [{"cost_목공": 2_000_000, "cost_도어": v} for v in (1_000_000, 1_100_000, 1_200_000, 1_300_000)]
+    line_items = [
+        {"category": "목공", "description": "ABS도어", "amount": 6_000_000},
+        {"category": "목공", "description": "인건비", "amount": 2_000_000},
+    ]
+
+    issues = await check_price_anomalies(_command(), line_items, _mock_engine(cases=cases))
+
+    assert [issue.process for issue in issues] == ["도어"]
+
+
+@pytest.mark.asyncio
+async def test_도어를_분리하기_전에_집계된_사례와는_견적서도_분리하지_않고_비교한다():
+    # cost_도어 필드가 없는 사례는 창호에 도어가 섞여 있다. 견적서만 분리하면 기준이 어긋난다
+    cases = [{"cost_창호": v} for v in (1_000_000, 1_100_000, 1_200_000, 1_300_000)]
+    line_items = [{"category": "창호", "description": "현관중문 3연동", "amount": 5_000_000}]
+
+    issues = await check_price_anomalies(_command(), line_items, _mock_engine(cases=cases))
+
+    assert [issue.process for issue in issues] == ["창호"]
+
+
+@pytest.mark.asyncio
+async def test_분리된_사례와_분리_전_사례가_섞여_있으면_견적서를_분리하지_않는다():
+    # 새로 수집된 사례 1건에만 cost_도어가 있고 나머지는 재집계 전 — 견적서만 분리하면 도어가 든 창호끼리
+    # 비교하던 것이 어긋나 "시세보다 낮음"이 붙는다
+    cases = [{"cost_창호": 1_200_000, "cost_도어": 1_100_000}] + [{"cost_창호": v} for v in (1_000_000, 1_100_000, 1_300_000)]
+    line_items = [{"category": "창호", "description": "현관중문 3연동", "amount": 1_150_000}]
+
+    issues = await check_price_anomalies(_command(), line_items, _mock_engine(cases=cases))
+
+    assert issues == []

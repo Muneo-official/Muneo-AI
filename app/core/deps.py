@@ -52,6 +52,7 @@ async def lifespan(app: FastAPI):
         reranker=reranker,
         vector_candidate_pool=settings.vector_candidate_pool,
         coefficients=active_coefficients,
+        window_includes_door=settings.estimate_window_includes_door,
     )
     app.state.estimate_repository = EstimateRepository(
         collection=mongo_client[settings.mongo_db_name]["estimates"],
