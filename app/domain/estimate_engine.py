@@ -24,7 +24,7 @@ from app.repositories.case_repository import CaseRepository
 # 설정
 # ══════════════════════════════════════════════════════
 
-ENGINE_VERSION     = "1.2.0"  # 저장된 견적의 재현성 추적용 (estimates.engine_version)
+ENGINE_VERSION     = "1.3.0"  # 저장된 견적의 재현성 추적용 (estimates.engine_version)
 TOP_K              = 15   # 최종 유사 사례 수 (리랭킹 이후)
 RERANK_POOL        = 20   # RRF 결합 이후, cross-encoder에 넣을 후보 수
 CASE_TEXT_REQUEST_CAP = 60  # _case_text()의 요청글 트렁케이션 길이. 캡이 넉넉할수록(예: 300)
@@ -40,6 +40,12 @@ SIZE_RANGE         = 6    # 평수 ±6평 필터 — 7→5(a39eaf4)를 거쳐 6�
 MAX_SPEC_ITEMS     = 12   # 공종별 명세 최대 항목 수 (ancillary 제외)
 SPEC_RATIO         = 0.15 # 비정규화 항목 등장 비율 threshold (전체 사례 수 × 비율)
 SCOPE_COVERAGE_MIN = 0.40 # 요청 공종 비용 합계 / 사례 총 비용 최소 비율 (전체 시공용)
+PARTIAL_SCOPE_POOL = 150  # 부분 시공 요청에서 부분 시공 사례를 고르기 위해 가져오는 후보 수. 부분 시공 사례는
+                          # 코퍼스의 약 17%라 기본 후보 풀(40)로는 3건을 채우기 어렵다. $vectorSearch의
+                          # limit은 numCandidates(150)를 넘을 수 없다.
+FULL_SCOPE_MIN_TRADES = 6  # 도배·바닥·욕실이 모두 있고 공종이 이 수 이상이면 전체 리모델링 사례로 본다
+PARTIAL_SCOPE_MIN_CASES = 8  # 부분 시공 사례가 이 수 이상 모일 때만 그 사례로 좁힌다. 3~4건으로 좁히면 한 건에
+                             # 크게 흔들리고 범위도 넓어진다. _margin_scale()이 범위를 줄이기 시작하는 건수와 같다.
 
 # 치수 표기 기호(×/✕/*/+) 정규화: "540*540" → "540×540"
 _DIM_SEP_RE = re.compile(r'(\d+)[×✕\*\+](\d+)')
@@ -453,6 +459,35 @@ class EstimateEngine:
         return _DIM_SEP_RE.sub(r'\1×\2', desc)
 
     @staticmethod
+    def _case_trades(case: dict) -> set[str]:
+        """사례에 금액이 있는 공종. 욕실·타일·설비는 욕실 하나로, 장판·마루는 바닥 하나로 센다."""
+        trades = set()
+        for key in {k for keys in 공종_TO_COST.values() for k in keys}:
+            if int(case.get(key) or 0) > 0:
+                name = key[len("cost_"):]
+                trades.add("욕실" if name in ("욕실", "타일", "설비") else name)
+        return trades
+
+    @classmethod
+    def _is_partial_case(cls, case: dict) -> bool:
+        """전체 리모델링이 아닌 사례인지. 기준은 정답셋의 시공범위 판정과 같다."""
+        trades = cls._case_trades(case)
+        return not ({"도배", "바닥", "욕실"} <= trades and len(trades) >= FULL_SCOPE_MIN_TRADES)
+
+    @classmethod
+    def _is_partial_request(cls, 공종들: list[str]) -> bool:
+        """요청한 공종 구성이 전체 리모델링이 아닌지. 사례와 같은 기준으로 본다."""
+        return cls._is_partial_case({key: 1 for g in 공종들 for key in 공종_TO_COST.get(g, [])})
+
+    @staticmethod
+    def _priced_trades(cases: list[dict], 공종들: list[str]) -> set[str]:
+        """요청 공종 중 사례들에서 금액을 구할 수 있는 공종."""
+        return {
+            g for g in 공종들
+            if any(int(c.get(k) or 0) > 0 for c in cases for k in 공종_TO_COST.get(g, []))
+        }
+
+    @staticmethod
     def _filter_by_scope_coverage(cases: list[dict], 공종들: list[str],
                                    min_ratio: float = SCOPE_COVERAGE_MIN) -> list[dict]:
         def _coverage(case: dict) -> float:
@@ -683,6 +718,9 @@ class EstimateEngine:
           Stage 5: 필터 없음                        (최후 수단)
         각 Stage에서 벡터 검색으로 후보 풀(vector_candidate_pool)을 넉넉히 가져온 뒤
         하이브리드 리랭킹으로 최종 TOP_K를 추린다.
+
+        부분 시공 요청은 그 전에 Stage 1~3을 부분 시공 사례만으로 한 번 돈다. 충분히 모이지 않으면
+        위 순서대로(전체 리모델링 사례 포함) 다시 찾는다.
         """
         total = await self._cases.count()
         pool_n = min(self._vector_candidate_pool, total) if total else self._vector_candidate_pool
@@ -694,21 +732,45 @@ class EstimateEngine:
         # 임베딩 계산은 CPU-bound 블로킹 연산이므로 이벤트 루프를 막지 않도록 threadpool에서 실행
         query_embedding = (await run_in_threadpool(self._embedder.encode, query)).tolist()
 
-        for stage, (use_size, use_region, use_has, use_grade) in enumerate([
+        stages = [
             (True,  True,  True,  True),   # Stage 1: 전체 조건 + 등급
             (True,  True,  True,  False),  # Stage 2: 등급 완화
             (True,  False, True,  False),  # Stage 3: 지역 완화
             (False, False, True,  False),  # Stage 4: 평수 완화
             (False, False, False, False),  # Stage 5: 필터 없음
-        ], start=1):
-            mongo_filter = self._build_filter(평수, 지역들, 공종들,
-                                       use_size=use_size,
-                                       use_region=use_region,
-                                       use_has=use_has,
-                                       use_grade=use_grade,
-                                       grade=grade)
+        ]
+
+        def stage_filter(flags: tuple[bool, bool, bool, bool]) -> dict | None:
+            use_size, use_region, use_has, use_grade = flags
+            return self._build_filter(평수, 지역들, 공종들, use_size=use_size, use_region=use_region,
+                                      use_has=use_has, use_grade=use_grade, grade=grade)
+
+        # 부분 시공 요청은 부분 시공 사례만으로 먼저 찾는다. 같은 공종이라도 부분 시공 사례의 금액은 전체
+        # 리모델링 사례보다 훨씬 낮다(코퍼스 평당 중앙값 기준 목공·전기·철거는 약 0.35~0.4배, 창호는 약
+        # 0.2배). 전체 리모델링 사례가 섞이면 부분 시공 견적이 2~3배 높게 나왔다.
+        # 요청이 "부분"이어도 공종 구성이 전체 리모델링과 같으면(도배·바닥·욕실 포함, 6개 이상) 좁히지 않는다.
+        # 평수 조건이 있는 Stage 1~3에서만 시도한다 — 평수를 풀면 금액 규모가 달라진다. 부분 시공 사례가
+        # PARTIAL_SCOPE_MIN_CASES건 미만이거나, 좁혔을 때 금액을 구할 수 있는 공종이 줄면 그 Stage는
+        # 건너뛴다(빠진 공종만큼 총액이 낮아진다).
+        if inp.get("시공범위", "부분") == "부분" and self._is_partial_request(공종들):
+            partial_pool_n = min(PARTIAL_SCOPE_POOL, total) if total else PARTIAL_SCOPE_POOL
+            for stage, flags in enumerate(stages[:3], start=1):
+                try:
+                    pool = await self._cases.vector_search(query_embedding, stage_filter(flags), partial_pool_n)
+                except Exception as exc:
+                    log_event("retrieve_cases_stage_error", level="warning", stage=stage, error=str(exc))
+                    continue
+                partial = [c for c in pool if self._is_partial_case(c)]
+                if (len(partial) >= PARTIAL_SCOPE_MIN_CASES
+                        and self._priced_trades(partial, 공종들) >= self._priced_trades(pool, 공종들)):
+                    reranked = await self._hybrid_rerank(query, partial)
+                    log_event("retrieve_cases", stage=stage, pool_size=len(pool), partial_pool_size=len(partial),
+                              case_count=len(reranked), fallback=False, partial_only=True)
+                    return reranked
+
+        for stage, flags in enumerate(stages, start=1):
             try:
-                cases = await self._cases.vector_search(query_embedding, mongo_filter, pool_n)
+                cases = await self._cases.vector_search(query_embedding, stage_filter(flags), pool_n)
                 if len(cases) >= 3:
                     reranked = await self._hybrid_rerank(query, cases)
                     log_event("retrieve_cases", stage=stage, pool_size=len(cases),

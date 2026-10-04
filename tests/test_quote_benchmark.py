@@ -214,6 +214,16 @@ async def test_leave_out_출처가_없으면_아무것도_빼지_않는다():
     assert [c["article_id"] for c in cases] == ["1", "2", "3"]
 
 
+async def test_leave_out_더_가져올_때_numCandidates도_같이_늘린다():
+    # $vectorSearch는 limit이 numCandidates보다 크면 오류를 낸다. 엔진이 후보 150건을 요청하는 경우가 있다
+    collection = _Collection(_CORPUS)
+    repo = LeaveOutCaseRepository(collection, _Settings())
+    await repo.leave_out("u/9", "2")
+    await repo.vector_search([0.0], None, 150)
+    stage = collection.pipelines[0][0]["$vectorSearch"]
+    assert (stage["limit"], stage["numCandidates"]) == (152, 152)
+
+
 async def test_leave_out_다음_레코드로_넘어가면_이전_제외는_풀린다():
     repo = LeaveOutCaseRepository(_Collection(_CORPUS), _Settings())
     await repo.leave_out("u/9", "2")
