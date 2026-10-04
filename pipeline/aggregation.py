@@ -6,7 +6,10 @@ pipeline/reference/build_rag.py의 build_category_costs()/check_has_keywords()�
 그대로 유지한다.
 """
 
-from pipeline.categories import normalize_category
+import re
+from collections.abc import Callable
+
+from pipeline.categories import FURNITURE_DOOR_KEYWORDS, normalize_category
 
 # has_* 판단 키워드. app/domain/estimate_engine.py가 실제로 읽는 has_* 필드 이름과
 # 반드시 일치해야 한다 — 여기서 없는 값이 하나라도 빠지면 참고 사례 검색(Stage 1~4
@@ -44,24 +47,109 @@ def build_has_flags(request_body_text: str, line_items: list[dict]) -> dict[str,
     }
 
 
+# ── 도어 분리 ──────────────────────────────────────────────────────────────
+# 견적서 양식에 따라 도어(방문·중문·현관문)가 "창호공사"에 들어가기도 하고 "목공, 도어"에 들어가기도 한다.
+# 분류를 그대로 따르면 cost_목공에 "도어가 든 목공"과 "도어가 없는 목공"이, cost_창호에 "샷시만"·"도어만"·
+# "샷시+도어"가 섞인다(샷시류가 있는 사례의 창호 중앙값 1,055만 원, 도어류만 있는 사례 310만 원). 그래서
+# 목공·창호로 분류된 품목 중 도어를 품명으로 골라 별도 공종 "도어"로 모은다.
+DOOR_CATEGORY = "도어"
+DOOR_SOURCE_CATEGORIES = ("목공", "창호")  # 도어 품목을 골라내는 공종. 철거·필름·가구의 문짝 품목은 건드리지 않는다
+
+# 도어로 보지 않는 품목
+#   - 발코니 쪽 문(터닝도어·폴딩도어·발코니도어)과 방충문: 샷시 업체가 시공하는 창호 제품
+#   - 가구 문짝·가구 손잡이: 도어공사에 적혀 있어도 가구다(pipeline/validators.py도 같은 키워드로 가려낸다)
+#   - "방문 실측"·"방문 상담"의 방문은 문이 아니다
+#   - 문지방(바닥 턱 마감)은 문짝 공사가 아니다
+_NOT_DOOR_RE = re.compile(
+    r"터닝|타닝|터닐|발코니|베란다|폴딩|샷시|샤시|새시|분합|방충|"
+    + "|".join(sorted(FURNITURE_DOOR_KEYWORDS))
+    + r"|싱크대|장롱|옷장|가구|실측|상담|문지방"
+)
+# 문짝과 그 문틀·문선, 손잡이·경첩·도어록 같은 부속까지 도어다. 부속을 빼면 부속만 창호에 남아 "샷시 금액
+# 10만 원"짜리 사례가 생긴다. 종문·동문·줄문·문문 등은 "중문"의 OCR 오인식이다.
+_DOOR_RE = re.compile(
+    r"도어|도아|(?<![a-z])door|문짝|문틀|문선|중문|현관문|현관출문|방문|목문|방화문|ABS(?!\s*몰딩)|"
+    r"손잡이|경첩|스토퍼|잠금장치|지문인|자문인|한샘문|"
+    r"(접이|미닫이|여닫이|여달이|유리|자동|출입|판넬|전실|욕실|화장실|다용도실|세탁실|드레스룸)문|"
+    r"현관.{0,10}(종문|동문|줄문|문문|용문|홀문|연문|3연동)|"
+    r"(^|[\s+(])문([\s+)]|$)",
+    re.IGNORECASE,
+)
+# 창호 안에서 샷시로 보는 품목. 여기에도 도어에도 안 걸리는 품목(인건비·식대·운송비·부자재)이 "일반 품목"이다
+# "창"은 시스템창·거실창·픽스창처럼 앞말이 다양해 낱말을 나열하지 않는다. "창고"만 뺀다
+_SASH_RE = re.compile(
+    r"창(?!고)|샷시|샤시|새시|발코니|베란다|터닝|타닝|터닐|폴딩|분합|방충|KCC|LX|하이샤시|유리|sin|dou",
+    re.IGNORECASE,
+)
+
+
+def is_door_item(description: str) -> bool:
+    """품명이 도어(방문·중문·현관문과 그 부속)인지. 목공·창호로 분류된 품목에만 쓴다."""
+    text = description or ""
+    return bool(_DOOR_RE.search(text)) and not _NOT_DOOR_RE.search(text)
+
+
+def category_amounts(line_items: list[dict], normalize: Callable[[str], str | None] = normalize_category) -> dict[str, float]:
+    """품목을 공종별로 더한다. 목공·창호 안의 도어는 "도어"로 옮긴다. 금액은 옮기기만 하고 만들거나 없애지 않는다.
+
+    창호 안의 일반 품목(인건비·식대·운송비 등)은 도어 쪽 몫을 떼어 준다 — 그대로 두면 도어만 한 견적에 샷시
+    금액이 남는다. 창호에 도어만 있으면 전부 도어로, 샷시와 도어가 함께 있으면 두 금액의 비율로 나눈다. 도어가
+    없으면 옮기지 않는다(샷시로 인식하지 못한 품목이어도 창호에 둔다). 목공 안의 일반 품목은 목공에 둔다.
+
+    normalize: 품목의 category를 정규화 공종으로 바꾸는 함수. 리스크 진단의 품목은 이미 정규화돼 있다.
+    """
+    sums: dict[str, float] = {}
+    window_door = window_sash = window_generic = 0.0
+    for item in line_items:
+        category = normalize(item.get("category", "") or "")
+        amount = int(item.get("amount") or 0)
+        if not category or amount <= 0:
+            continue
+        description = item.get("description") or ""
+        if category == "창호":
+            if is_door_item(description):
+                window_door += amount
+            elif _SASH_RE.search(description):
+                window_sash += amount
+            else:
+                window_generic += amount
+        elif category == "목공" and is_door_item(description):
+            sums[DOOR_CATEGORY] = sums.get(DOOR_CATEGORY, 0) + amount
+        else:
+            sums[category] = sums.get(category, 0) + amount
+
+    if window_door or window_sash or window_generic:
+        if window_door <= 0:
+            door_part, sash_part = 0.0, window_sash + window_generic
+        elif window_sash <= 0:
+            door_part, sash_part = window_door + window_generic, 0.0
+        else:
+            share = window_sash / (window_sash + window_door)
+            sash_part = window_sash + window_generic * share
+            door_part = window_door + window_generic * (1 - share)
+        if sash_part > 0:
+            sums["창호"] = sash_part
+        if door_part > 0:
+            sums[DOOR_CATEGORY] = sums.get(DOOR_CATEGORY, 0) + door_part
+    return sums
+
+
 def build_category_costs(line_items: list[dict], total_cost: int) -> dict[str, int]:
-    """line_items에서 정규화 카테고리별 금액 합산.
+    """line_items에서 정규화 카테고리별 금액 합산. 목공·창호 안의 도어는 cost_도어로 분리한다.
 
     대분류/소분류 중복 집계를 피하기 위해 line_items 합계가 total_cost 1.3배 이상이면
     total_cost 비율로 재산정한다(원본 로직 그대로).
+
+    cost_도어는 도어가 없어도 0으로 넣는다 — 이 필드가 있는지로 "도어를 분리한 기준으로 집계된 사례인지"를
+    구분한다(재집계 전의 사례에는 이 필드가 없고 cost_목공·cost_창호에 도어가 섞여 있다).
     """
-    raw: dict[str, int] = {}
-    for item in line_items:
-        norm = normalize_category(item.get("category", ""))
-        if not norm:
-            continue
-        amount = int(item.get("amount") or 0)
-        if amount > 0:
-            raw[norm] = raw.get(norm, 0) + amount
+    raw = category_amounts(line_items)
 
     line_sum = sum(raw.values())
     if total_cost > 0 and line_sum > total_cost * 1.3:
         ratio = total_cost / line_sum
-        raw = {k: int(v * ratio) for k, v in raw.items()}
+        raw = {k: v * ratio for k, v in raw.items()}
 
-    return {f"cost_{k}": v for k, v in raw.items()}
+    costs = {f"cost_{k}": int(v) for k, v in raw.items() if int(v) > 0}
+    costs.setdefault(f"cost_{DOOR_CATEGORY}", 0)
+    return costs

@@ -23,6 +23,7 @@ from app.core.logging import log_event
 from app.domain.estimate_engine import REGION_MAP, EstimateEngine
 from app.domain.risk_models import RiskIssue
 from app.schemas.risk import AnalyzeRiskCommand
+from pipeline.aggregation import DOOR_CATEGORY, category_amounts
 from pipeline.crawl_region import REGION_PATTERNS
 
 MIN_COMPARABLE_CASES = 3   # retrieve_cases 결과가 이보다 적으면 근거 부족으로 가격 체크 스킵
@@ -45,6 +46,7 @@ _CATEGORY_TO_PROCESS = {
     "도장": "도장",
     "가구": "가구",
     "창호": "창호",
+    DOOR_CATEGORY: DOOR_CATEGORY,
     "필름": "필름",
     "공과잡비": "공과잡비",
     "확장": "확장",
@@ -81,7 +83,27 @@ def _price_range(values: list[int]) -> dict[str, int] | None:
     return {"최소": lo, "최대": hi, "중간": mid}
 
 
-def _sum_amount_by_category(line_items: list[dict[str, Any]]) -> dict[str, int]:
+def _cases_split_doors(cases: list[dict[str, Any]]) -> bool:
+    """참고 사례가 전부 도어를 분리한 기준으로 집계돼 있는지.
+
+    cost_도어 필드는 그 기준으로 집계된 사례에만 있다(도어가 없으면 0으로 들어간다). 새로 수집된 사례에만
+    이 필드가 있고 나머지는 재집계 전인 상태에서는 기준이 섞여 있으므로, 전부 분리된 경우에만 견적서도
+    분리한다. 금액 필드가 아예 없는 사례(파싱 결과가 없는 사례)는 판단에서 뺀다.
+    """
+    priced = [c for c in cases if any(k.startswith("cost_") and k != "cost_per_pyeong" for k in c)]
+    return bool(priced) and all("cost_도어" in c for c in priced)
+
+
+def _sum_amount_by_category(line_items: list[dict[str, Any]], split_doors: bool) -> dict[str, int]:
+    """견적서 품목을 공종별로 더한다.
+
+    split_doors: 참고 사례가 도어를 분리한 기준으로 집계돼 있으면 True. 이때는 견적서의 목공·창호에 든 도어도
+    같은 규칙으로 "도어"에 모아야 한다 — 한쪽만 분리하면 도어만 있는 견적서의 창호가 "시세보다 낮음",
+    도어가 든 목공이 "시세보다 높음"으로 잘못 잡힌다.
+    """
+    if split_doors:
+        # 파서가 내는 category는 이미 정규화된 값이다
+        return {category: int(amount) for category, amount in category_amounts(line_items, normalize=lambda c: c).items()}
     totals: dict[str, int] = defaultdict(int)
     for item in line_items:
         category = item.get("category")
@@ -109,13 +131,15 @@ async def check_price_anomalies(
     engine: EstimateEngine,
 ) -> list[RiskIssue]:
     """카테고리별 line_item 합산 금액을 유사 사례 가격 범위(P10~P90)와 비교해 이상 항목을 찾는다."""
-    category_amounts = _sum_amount_by_category(line_items)
-    if not category_amounts:
+    amounts_by_category = _sum_amount_by_category(line_items, split_doors=False)
+    if not amounts_by_category:
         return []
 
     inp = _build_engine_input(command)
     query = engine.build_query(inp)
     cases = await engine.retrieve_cases(query, inp)
+    if _cases_split_doors(cases):
+        amounts_by_category = _sum_amount_by_category(line_items, split_doors=True)
 
     if len(cases) < MIN_COMPARABLE_CASES:
         log_event(
@@ -127,7 +151,7 @@ async def check_price_anomalies(
         return []
 
     issues: list[RiskIssue] = []
-    for category, amount in category_amounts.items():
+    for category, amount in amounts_by_category.items():
         values = [
             int(v) for c in cases if (v := c.get(f"cost_{category}"))
         ]

@@ -19,12 +19,14 @@ from starlette.concurrency import run_in_threadpool
 
 from app.core.logging import log_event
 from app.repositories.case_repository import CaseRepository
+from pipeline.aggregation import DOOR_CATEGORY, DOOR_SOURCE_CATEGORIES, is_door_item
+from pipeline.categories import normalize_category
 
 # ══════════════════════════════════════════════════════
 # 설정
 # ══════════════════════════════════════════════════════
 
-ENGINE_VERSION     = "1.0.0"  # 저장된 견적의 재현성 추적용 (estimates.engine_version)
+ENGINE_VERSION     = "1.4.0"  # 저장된 견적의 재현성 추적용 (estimates.engine_version)
 TOP_K              = 15   # 최종 유사 사례 수 (리랭킹 이후)
 RERANK_POOL        = 20   # RRF 결합 이후, cross-encoder에 넣을 후보 수
 CASE_TEXT_REQUEST_CAP = 60  # _case_text()의 요청글 트렁케이션 길이. 캡이 넉넉할수록(예: 300)
@@ -40,6 +42,14 @@ SIZE_RANGE         = 6    # 평수 ±6평 필터 — 7→5(a39eaf4)를 거쳐 6�
 MAX_SPEC_ITEMS     = 12   # 공종별 명세 최대 항목 수 (ancillary 제외)
 SPEC_RATIO         = 0.15 # 비정규화 항목 등장 비율 threshold (전체 사례 수 × 비율)
 SCOPE_COVERAGE_MIN = 0.40 # 요청 공종 비용 합계 / 사례 총 비용 최소 비율 (전체 시공용)
+PARTIAL_SCOPE_POOL = 150  # 부분 시공 요청에서 부분 시공 사례를 고르기 위해 가져오는 후보 수. 부분 시공 사례는
+                          # 코퍼스의 약 17%라 기본 후보 풀(40)로는 3건을 채우기 어렵다. $vectorSearch의
+                          # limit은 numCandidates(150)를 넘을 수 없다.
+FULL_SCOPE_MIN_TRADES = 6  # 도배·바닥·욕실이 모두 있고 공종이 이 수 이상이면 전체 리모델링 사례로 본다
+PARTIAL_SCOPE_MIN_CASES = 8  # 부분 시공 사례가 이 수 이상 모일 때만 그 사례로 좁힌다. 3~4건으로 좁히면 한 건에
+                             # 크게 흔들리고 범위도 넓어진다. _margin_scale()이 범위를 줄이기 시작하는 건수와 같다.
+PARTIAL_SCOPE_MIN_VALUES = 3  # 좁힌 뒤에도 요청 공종마다 금액이 이 수 이상 있어야 한다. 사례가 8건이어도 어떤
+                              # 공종의 금액이 1~2건에서만 나오면 그 공종은 한 건에 흔들린다.
 
 # 치수 표기 기호(×/✕/*/+) 정규화: "540*540" → "540×540"
 _DIM_SEP_RE = re.compile(r'(\d+)[×✕\*\+](\d+)')
@@ -99,6 +109,7 @@ REGION_MAP = {
     "가구":       "has_가구",
     "전기/조명":  "has_전기",
     "창호":       "has_창호",
+    "도어":       "has_창호",  # has_창호의 키워드에 도어·현관문이 들어 있다. 도어 전용 플래그는 없다
 }
 
 # 사용자 공종 → DB cost_* 키
@@ -111,6 +122,7 @@ REGION_MAP = {
     "가구":       ["cost_가구"],
     "철거":       ["cost_철거"],
     "전기/조명":  ["cost_전기"],
+    "도어":       ["cost_도어"],  # 방문·중문·현관문. 목공·창호 품목에서 품명으로 분리해 집계한다(pipeline/aggregation.py)
     "목공":       ["cost_목공"],
     "도장":       ["cost_도장"],
     "설비":       ["cost_설비"],
@@ -133,6 +145,7 @@ REGION_MAP = {
     "철거":       ["철거공사"],
     "창호":       ["창호공사"],
     "필름":       ["필름공사"],
+    "도어":       [DOOR_CATEGORY],  # 견적서의 분류가 아니라 collect_line_items()가 품명으로 골라 묶는 이름이다
 }
 
 공종_EXCLUDE_DESC: dict[str, set] = {
@@ -372,6 +385,16 @@ def _margin_scale(n_cases: int) -> tuple[float, float]:
     return 1.2, 1.2
 
 
+def _total_range(mid: int, lo_margin: float, hi_margin: float, n_cases: int) -> tuple[int, int]:
+    """총액의 (최소, 최대). 중간값에서 아래로 lo_margin, 위로 hi_margin만큼 — 사례 수에 따라 축소한다.
+
+    범위는 위로 더 넓다. 코퍼스의 total_cost는 이윤·보험료가 빠진 공사비로 저장된 건이 많아 실제 견적이
+    참고 사례보다 높게 나오는 쪽이 흔하다. 중간값은 이 범위의 중점이 아니라 호출하는 쪽이 넘긴 값 그대로다.
+    """
+    lo_scale, hi_scale = _margin_scale(n_cases)
+    return int(mid * (1 - lo_margin * lo_scale)), int(mid * (1 + hi_margin * hi_scale))
+
+
 도배_범위_비율: dict[str, float] = {
     "전체": 1.00,
     "거실": 0.35,
@@ -408,6 +431,7 @@ class EstimateEngine:
         reranker: CrossEncoder | None,  # None이면 cross-encoder 재정렬 없이 RRF 순위를 그대로 쓴다
         vector_candidate_pool: int = 40,
         coefficients: dict | None = None,
+        window_includes_door: bool = True,
     ):
         self._cases = case_repository
         self._embedder = embedder
@@ -415,6 +439,9 @@ class EstimateEngine:
         self._vector_candidate_pool = vector_candidate_pool
         self._coefficients = coefficients or {}
         self._coefficient_version = self._coefficients.get("version", "default")
+        # True면 "창호"만 고른 요청을 샷시 + 도어로 본다(화면에 "도어" 항목이 생기기 전의 뜻). 요청에 "도어"가
+        # 따로 있으면 이 값과 무관하게 "창호"는 샷시만이다.
+        self._window_includes_door = window_includes_door
 
     def _coeff(self, category: str) -> dict | float:
         """버전 관리되는 보정계수 카테고리 조회. DB에 없는 카테고리는 하드코딩 기본값으로 폴백.
@@ -443,8 +470,81 @@ class EstimateEngine:
         return _DIM_SEP_RE.sub(r'\1×\2', desc)
 
     @staticmethod
-    def _filter_by_scope_coverage(cases: list[dict], 공종들: list[str],
-                                   min_ratio: float = SCOPE_COVERAGE_MIN) -> list[dict]:
+    def _case_trades(case: dict) -> set[str]:
+        """사례에 금액이 있는 공종. 욕실·타일·설비는 욕실 하나로, 장판·마루는 바닥 하나로 센다."""
+        trades = set()
+        for key in {k for keys in 공종_TO_COST.values() for k in keys}:
+            if int(case.get(key) or 0) > 0:
+                name = key[len("cost_"):]
+                # 욕실·타일·설비는 욕실로, 도어는 창호로 묶는다 — 도어를 따로 세면 공종 수가 늘어 같은 사례의
+                # 전체/부분 판정이 도어를 분리하기 전과 달라진다
+                trades.add("욕실" if name in ("욕실", "타일", "설비") else "창호" if name == "도어" else name)
+        return trades
+
+    @classmethod
+    def _is_partial_case(cls, case: dict) -> bool:
+        """전체 리모델링이 아닌 사례인지. 기준은 정답셋의 시공범위 판정과 같다."""
+        trades = cls._case_trades(case)
+        return not ({"도배", "바닥", "욕실"} <= trades and len(trades) >= FULL_SCOPE_MIN_TRADES)
+
+    @classmethod
+    def _is_partial_request(cls, 공종들: list[str]) -> bool:
+        """요청한 공종 구성이 전체 리모델링이 아닌지. 사례와 같은 기준으로 본다.
+
+        공종이 없는 요청은 부분 시공 요청이 아니다 — 리스크 진단의 가격 비교가 공종 없이 "부분"으로 호출하는데,
+        견적서가 전체 리모델링일 수 있어 부분 시공 사례로 좁히면 안 된다.
+        """
+        if not 공종들:
+            return False
+        return cls._is_partial_case({key: 1 for g in 공종들 for key in 공종_TO_COST.get(g, [])})
+
+    def _cost_keys(self, 공종: str, 공종들: list[str]) -> list[str]:
+        """이 요청에서 공종의 금액을 읽을 cost_* 키. 키가 여러 개면 사례별로 더한다."""
+        keys = list(공종_TO_COST.get(공종, []))
+        if 공종 == "욕실" and "설비" in 공종들:
+            keys = [k for k in keys if k != "cost_설비"]
+        if 공종 == "창호" and self._window_includes_door and "도어" not in 공종들:
+            keys.append("cost_도어")
+        return keys
+
+    def _value_counts(self, cases: list[dict], 공종들: list[str]) -> dict[str, int]:
+        """요청 공종별로, 그 공종의 금액이 있는 사례 수."""
+        return {
+            g: sum(1 for c in cases if any(int(c.get(k) or 0) > 0 for k in self._cost_keys(g, 공종들)))
+            for g in 공종들
+        }
+
+    async def _retrieve_partial_cases(self, query: str, query_embedding: list[float], mongo_filter: dict | None,
+                                      공종들: list[str], total: int) -> list[dict] | None:
+        """부분 시공 사례만으로 고른 참고 사례. 좁힐 수 없으면 None — 호출하는 쪽이 기존 순서대로 찾는다.
+
+        좁히는 조건 (하나라도 어긋나면 좁히지 않는다)
+          - 부분 시공 사례가 PARTIAL_SCOPE_MIN_CASES건 이상
+          - 최종 사례(TOP_K로 자른 뒤)에서, 후보에 금액이 있던 요청 공종마다 금액이 PARTIAL_SCOPE_MIN_VALUES건
+            이상. 리랭킹 전의 후보로 검사하면 자르는 과정에서 그 공종의 금액이 빠질 수 있다.
+        """
+        pool_n = min(PARTIAL_SCOPE_POOL, total) if total else PARTIAL_SCOPE_POOL
+        try:
+            pool = await self._cases.vector_search(query_embedding, mongo_filter, pool_n)
+            partial = [c for c in pool if self._is_partial_case(c)]
+            if len(partial) < PARTIAL_SCOPE_MIN_CASES:
+                return None
+            reranked = await self._hybrid_rerank(query, partial)
+        except Exception as exc:
+            log_event("retrieve_cases_stage_error", level="warning", stage="partial", error=str(exc))
+            return None
+
+        kept = self._value_counts(reranked, 공종들)
+        thin = [g for g, n in self._value_counts(pool, 공종들).items() if n > 0 and kept[g] < PARTIAL_SCOPE_MIN_VALUES]
+        if thin:
+            log_event("retrieve_cases_partial_skipped", partial_pool_size=len(partial), thin_trades=thin)
+            return None
+        log_event("retrieve_cases", stage=2, pool_size=len(pool), partial_pool_size=len(partial),
+                  case_count=len(reranked), fallback=False, partial_only=True)
+        return reranked
+
+    def _filter_by_scope_coverage(self, cases: list[dict], 공종들: list[str],
+                                  min_ratio: float = SCOPE_COVERAGE_MIN) -> list[dict]:
         def _coverage(case: dict) -> float:
             tc = int(case.get("total_cost") or 0)
             if tc <= 0:
@@ -452,7 +552,7 @@ class EstimateEngine:
             trade_sum = sum(
                 int(case.get(k) or 0)
                 for g in 공종들
-                for k in 공종_TO_COST.get(g, [])
+                for k in self._cost_keys(g, 공종들)
             )
             return trade_sum / tc
 
@@ -460,9 +560,15 @@ class EstimateEngine:
         return filtered if len(filtered) >= 3 else cases
 
     async def collect_line_items(self, cases, 공종들):
+        def spec_categories(공종: str) -> list[str]:
+            cats = list(공종_TO_CATEGORY.get(공종, []))
+            if 공종 == "창호" and "cost_도어" in self._cost_keys(공종, 공종들):
+                cats.append(DOOR_CATEGORY)  # "창호"가 샷시 + 도어를 뜻하는 요청
+            return cats
+
         target_categories: list[str] = []
         for 공종 in 공종들:
-            target_categories.extend(공종_TO_CATEGORY.get(공종, []))
+            target_categories.extend(spec_categories(공종))
 
         if not target_categories:
             return {}
@@ -481,21 +587,27 @@ class EstimateEngine:
             if not pe:
                 continue
             for item in pe.get("line_items", []):
-                cat = item.get("category", "")
+                source_cat = item.get("category") or ""
+                # 목공·창호로 분류된 도어 품목은 "도어"로 묶는다. 품명으로 고르는 기준은 금액 집계(cost_도어)와
+                # 같다. 창호의 인건비 같은 일반 품목은 집계에서는 도어 몫을 떼지만 여기서는 원래 공종에 둔다.
+                is_door = (normalize_category(source_cat) in DOOR_SOURCE_CATEGORIES
+                           and is_door_item(item.get("description") or ""))
+                cat = DOOR_CATEGORY if is_door else source_cat
                 if cat not in target_categories:
                     continue
                 amt = int(item.get("amount") or 0)
                 if amt <= 0:
                     continue
-                desc = self._normalize_spec_desc(item.get("description", ""))
-                normalized, was_norm = self._normalize_desc(cat, desc)
+                desc = self._normalize_spec_desc(item.get("description") or "")
+                # 품명 정리 규칙(NORM_MAP)은 견적서의 원래 공종 이름으로 찾는다 — 중문·방문·문틀 규칙이 거기 있다
+                normalized, was_norm = self._normalize_desc(source_cat, desc)
                 if normalized is None:
                     continue
                 amounts[cat][(normalized, was_norm)].append(amt)
 
         result = {}
         for 공종 in 공종들:
-            cats = 공종_TO_CATEGORY.get(공종, [])
+            cats = spec_categories(공종)
             excluded = 공종_EXCLUDE_DESC.get(공종, set())
 
             merged: dict[tuple, list] = defaultdict(list)
@@ -673,6 +785,9 @@ class EstimateEngine:
           Stage 5: 필터 없음                        (최후 수단)
         각 Stage에서 벡터 검색으로 후보 풀(vector_candidate_pool)을 넉넉히 가져온 뒤
         하이브리드 리랭킹으로 최종 TOP_K를 추린다.
+
+        부분 시공 요청은 그 전에 같은 지역·평수의 부분 시공 사례만으로 한 번 찾는다. 충분히 모이지 않으면
+        위 순서대로(전체 리모델링 사례 포함) 다시 찾는다.
         """
         total = await self._cases.count()
         pool_n = min(self._vector_candidate_pool, total) if total else self._vector_candidate_pool
@@ -684,21 +799,34 @@ class EstimateEngine:
         # 임베딩 계산은 CPU-bound 블로킹 연산이므로 이벤트 루프를 막지 않도록 threadpool에서 실행
         query_embedding = (await run_in_threadpool(self._embedder.encode, query)).tolist()
 
-        for stage, (use_size, use_region, use_has, use_grade) in enumerate([
+        stages = [
             (True,  True,  True,  True),   # Stage 1: 전체 조건 + 등급
             (True,  True,  True,  False),  # Stage 2: 등급 완화
             (True,  False, True,  False),  # Stage 3: 지역 완화
             (False, False, True,  False),  # Stage 4: 평수 완화
             (False, False, False, False),  # Stage 5: 필터 없음
-        ], start=1):
-            mongo_filter = self._build_filter(평수, 지역들, 공종들,
-                                       use_size=use_size,
-                                       use_region=use_region,
-                                       use_has=use_has,
-                                       use_grade=use_grade,
-                                       grade=grade)
+        ]
+
+        def stage_filter(flags: tuple[bool, bool, bool, bool]) -> dict | None:
+            use_size, use_region, use_has, use_grade = flags
+            return self._build_filter(평수, 지역들, 공종들, use_size=use_size, use_region=use_region,
+                                      use_has=use_has, use_grade=use_grade, grade=grade)
+
+        # 부분 시공 요청은 부분 시공 사례만으로 먼저 찾는다. 같은 공종이라도 부분 시공 사례의 금액은 전체
+        # 리모델링 사례보다 훨씬 낮다(코퍼스 평당 중앙값 기준 목공·전기·철거는 약 0.35~0.4배, 창호는 약
+        # 0.2배). 전체 리모델링 사례가 섞이면 부분 시공 견적이 2~3배 높게 나왔다.
+        산출_공종들 = [g for g in 공종들 if g not in self._UNSUPPORTED_공종 and 공종_TO_COST.get(g)]
+        if inp.get("시공범위", "부분") == "부분" and self._is_partial_request(산출_공종들):
+            # 같은 지역·평수 조건(Stage 2의 필터)으로 한 번만 찾는다. 지역을 풀면 서울 요청이 지방 가격으로
+            # 나온다 — 지역 계수는 "필터가 같은 지역 사례를 가져온다"는 전제로 적용하지 않고 있다.
+            partial = await self._retrieve_partial_cases(query, query_embedding, stage_filter(stages[1]),
+                                                         산출_공종들, total)
+            if partial is not None:
+                return partial
+
+        for stage, flags in enumerate(stages, start=1):
             try:
-                cases = await self._cases.vector_search(query_embedding, mongo_filter, pool_n)
+                cases = await self._cases.vector_search(query_embedding, stage_filter(flags), pool_n)
                 if len(cases) >= 3:
                     reranked = await self._hybrid_rerank(query, cases)
                     log_event("retrieve_cases", stage=stage, pool_size=len(cases),
@@ -718,21 +846,19 @@ class EstimateEngine:
         total_costs: list[int] = []
         cat_costs: dict[str, list[int]] = defaultdict(list)
 
-        욕실_keys = list(공종_TO_COST.get("욕실", []))
-        if "욕실" in 공종들 and "설비" in 공종들:
-            욕실_keys = [k for k in 욕실_keys if k != "cost_설비"]
-
         for case in cases:
             tc = int(case.get("total_cost") or 0)
             if tc > 0:
                 total_costs.append(tc)
 
             for 공종 in 공종들 + ["철거"]:
-                keys = 욕실_keys if 공종 == "욕실" else 공종_TO_COST.get(공종, [])
-                for cost_key in keys:
-                    val = int(case.get(cost_key) or 0)
-                    if val > 0:
-                        cat_costs[공종].append(val)
+                keys = self._cost_keys(공종, 공종들)
+                # 키가 여러 개인 공종(욕실)은 사례별 합 하나만 넣는다. 키마다 따로 넣으면 중앙값이
+                # 세 부분의 합이 아니라 부분 하나의 크기가 돼, 실제 견적 대비 2배 넘게 낮게 나왔다.
+                # 같은 욕실 공사가 사례마다 욕실·설비·타일에 다르게 나뉘어 있어 있는 값만 더한다.
+                val = sum(int(case.get(cost_key) or 0) for cost_key in keys)
+                if val > 0:
+                    cat_costs[공종].append(val)
 
         return total_costs, cat_costs
 
@@ -788,9 +914,6 @@ class EstimateEngine:
             "마감/공과잡비" in inp.get("공종", []) or
             inp.get("시공범위") == "전체"
         )
-        if 마감비율_적용:
-            notes.append(f"마감/공과잡비 포함 (총 공사비의 {self._coeff('finishing_ratio'):.0%})")
-
         return factor, notes, 양중 + 철거추가, 마감비율_적용
 
     # ── 5. 공종별 개별 보정계수 계산 ────────────────────────
@@ -928,40 +1051,42 @@ class EstimateEngine:
                     "최대": int(r["최대"] * factor),
                 }
 
-        마감_lo = 마감_hi = 0
-        마감_비율 = self._coeff("finishing_ratio")
-
-        ms_lo, ms_hi = _margin_scale(len(cases))
-        if inp.get("시공범위") == "전체" and total_costs:
+        # 총액의 "중간"은 참고 사례의 중앙값(보정 반영)이다. 범위의 중점으로 계산하지 않는다 —
+        # 범위가 위로 더 넓어서, 중점을 쓰면 중간값이 참고 사례 중앙값보다 항상 높게 나온다.
+        if 시공범위 == "전체":
             r = self.cost_range(total_costs)
-            adj_mid_raw = int(r["중간"] * factor) + extra
-            adj_lo = int(adj_mid_raw * (1 - 전체_LO_MARGIN * ms_lo))
-            adj_hi = int(adj_mid_raw * (1 + 전체_HI_MARGIN * ms_hi))
-            if 마감비율_적용:
-                마감_lo = int(adj_lo * 마감_비율)
-                마감_hi = int(adj_hi * 마감_비율)
-                adj_lo = int(adj_lo * (1 + 마감_비율))
-                adj_hi = int(adj_hi * (1 + 마감_비율))
+            adj_mid = int(r["중간"] * factor) + extra
+            adj_lo, adj_hi = _total_range(adj_mid, 전체_LO_MARGIN, 전체_HI_MARGIN, len(cases))
+            마감_가산 = False
         elif 공종별_범위:
-            adj_mid_raw = sum(r["중간"] for r in 공종별_범위.values()) + extra
-            adj_lo = int(adj_mid_raw * (1 - 부분_LO_MARGIN * ms_lo))
-            adj_hi = int(adj_mid_raw * (1 + 부분_HI_MARGIN * ms_hi))
-            if 마감비율_적용:
-                마감_lo = int(adj_lo * 마감_비율)
-                마감_hi = int(adj_hi * 마감_비율)
-                adj_lo = int(adj_lo * (1 + 마감_비율))
-                adj_hi = int(adj_hi * (1 + 마감_비율))
+            adj_mid = sum(r["중간"] for r in 공종별_범위.values()) + extra
+            adj_lo, adj_hi = _total_range(adj_mid, 부분_LO_MARGIN, 부분_HI_MARGIN, len(cases))
+            마감_가산 = True
         else:
             r = self.cost_range(total_costs)
             adj_lo = int(r["최소"] * factor) + extra
+            adj_mid = int(r["중간"] * factor) + extra
             adj_hi = int(r["최대"] * factor) + extra
-            if 마감비율_적용:
-                마감_lo = int(adj_lo * 마감_비율)
-                마감_hi = int(adj_hi * 마감_비율)
-                adj_lo = int(adj_lo * (1 + 마감_비율))
-                adj_hi = int(adj_hi * (1 + 마감_비율))
+            마감_가산 = False
 
-        adj_mid = (adj_lo + adj_hi) // 2
+        # 마감/공과잡비: 사례 총금액에서 구한 총액에는 견적서의 기타공사가 대부분 들어 있어(코퍼스에서
+        # 확인 가능한 사례의 약 3분의 2) 또 더하지 않고 총액 안의 몫으로만 표시한다. 공종 중간값의 합으로
+        # 구한 총액에는 마감이 없으므로 더한다.
+        마감_범위 = None
+        if 마감비율_적용:
+            마감_비율 = self._coeff("finishing_ratio")
+            마감_범위 = {
+                "최소": int(adj_lo * 마감_비율),
+                "중간": int(adj_mid * 마감_비율),
+                "최대": int(adj_hi * 마감_비율),
+            }
+            if 마감_가산:
+                adj_lo = int(adj_lo * (1 + 마감_비율))
+                adj_mid = int(adj_mid * (1 + 마감_비율))
+                adj_hi = int(adj_hi * (1 + 마감_비율))
+                notes.append(f"마감/공과잡비 포함 (총 공사비의 {마감_비율:.0%})")
+            else:
+                notes.append(f"마감/공과잡비는 총액에 포함된 금액 중 약 {마감_비율:.0%}로 표시")
 
         def _cost_per_pyeong(c: dict) -> int:
             # cost_per_pyeong은 ingest 시점에 미리 계산해 저장한 필드라, size_pyeong이
@@ -989,12 +1114,8 @@ class EstimateEngine:
 
         공종별_항목_명세 = await self.collect_line_items(cases, 추출대상_공종들)
 
-        if 마감비율_적용 and 마감_hi > 0:
-            공종별_범위["마감/공과잡비"] = {
-                "최소": 마감_lo,
-                "중간": (마감_lo + 마감_hi) // 2,
-                "최대": 마감_hi,
-            }
+        if 마감_범위 and 마감_범위["최대"] > 0:
+            공종별_범위["마감/공과잡비"] = 마감_범위
             평수 = int(inp.get("평수") or 30)
             철거포함 = "철거" in 공종들
             엘베있음 = inp.get("엘리베이터") != "없음"
@@ -1069,9 +1190,12 @@ class EstimateEngine:
 
         실공종_수 = len([c for c in 공종들 if c != "마감/공과잡비"])
         if 실공종_수 == 1:
-            output["단독시공_주의"] = (
-                "단일 공종 요청입니다. 전체 리모델링 사례에서 해당 공종 비용을 추출하여 산출했으며, "
-                "단독 시공 시 실제 가격이 5~10% 높을 수 있습니다."
-            )
+            if all(self._is_partial_case(c) for c in cases):
+                output["단독시공_주의"] = "단일 공종 요청입니다. 부분 시공 사례에서 해당 공종 비용을 추출하여 산출했습니다."
+            else:
+                output["단독시공_주의"] = (
+                    "단일 공종 요청입니다. 전체 리모델링 사례에서 해당 공종 비용을 추출하여 산출했으며, "
+                    "단독 시공 시 실제 가격이 5~10% 높을 수 있습니다."
+                )
 
         return output
