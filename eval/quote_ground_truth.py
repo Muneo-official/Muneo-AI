@@ -38,7 +38,7 @@ from pipeline.categories import normalize_category
 
 load_dotenv()
 
-RULES_VERSION = "1.0"
+RULES_VERSION = "1.1"  # 1.1: 도어를 창호·목공에서 떼어 별도 공종으로 (섹션의 "도어" 금액)
 _DIR = pathlib.Path(__file__).parent / "test_inputs"
 CANDIDATES_PATH = _DIR / "quote_gt_candidates.json"
 GROUND_TRUTH_PATH = _DIR / "quote_ground_truth.json"
@@ -72,7 +72,10 @@ CATEGORY_TO_SECTION = {
     "가구": ("가구공사", "가구"), "도배": ("도배공사", "도배"), "필름": ("시트공사", "필름"),
     "공과잡비": ("기타공사", "마감/공과잡비"),
 }
-공종_순서 = ["창호", "욕실", "가구", "전기/조명", "도장", "필름", "장판", "마루", "도배", "목공", "철거", "마감/공과잡비"]
+공종_순서 = ["창호", "도어", "욕실", "가구", "전기/조명", "도장", "필름", "장판", "마루", "도배", "목공", "철거", "마감/공과잡비"]
+# 도어(방문·중문·현관문)가 들어 있을 수 있는 섹션의 공종. 이 섹션에는 "도어" 금액을 따로 적는다
+도어_섹션_공종 = ("창호", "목공")
+도어_미확인_플래그 = "도어_미확인"
 
 _마루_RE = re.compile(r"마루|원목")
 _장판_RE = re.compile(r"장판|모노륨|우드[름롬룸]|데코타일")
@@ -118,7 +121,9 @@ def _draft_sections(case: dict) -> tuple[list[dict], dict[str, list[dict]]]:
         마루 = _sum([i for i in floor if _마루_RE.search(i.get("description") or "")])
         장판 = _sum([i for i in floor if _장판_RE.search(i.get("description") or "")])
         공종_of["바닥공사"] = "마루" if 마루 > 장판 else "장판"
-    sections = [{"name": n, "amount": _sum(its), "공종": 공종_of[n]} for n, its in by_section.items()]
+    # 창호·목공 섹션의 "도어"는 초안에서 비워 둔다(None) — 검수할 때 이미지를 보고 적는다
+    sections = [{"name": n, "amount": _sum(its), "공종": 공종_of[n],
+                 **({"도어": None} if 공종_of[n] in 도어_섹션_공종 else {})} for n, its in by_section.items()]
     return sections, by_section
 
 
@@ -127,7 +132,8 @@ def _scope(공종들: list[str]) -> str:
 
     초안 단계에서는 타일·도기·수전 섹션이 각각 '욕실'로 들어오므로 집합으로 바꿔 한 번만 센다.
     """
-    실공종 = set(공종들) - {매핑_불가, "마감/공과잡비"}
+    # 도어는 창호와 한 공종으로 센다 — 도어를 떼기 전(규칙 1.0)과 판정이 달라지지 않게. 엔진의 사례 판정도 같다
+    실공종 = {"창호" if g == "도어" else g for g in 공종들} - {매핑_불가, "마감/공과잡비"}
     바닥 = bool(실공종 & {"장판", "마루"})
     return "전체" if ({"도배", "욕실"} <= 실공종 and 바닥 and len(실공종) >= 6) else "부분"
 
@@ -137,13 +143,23 @@ def derive(record: dict) -> None:
     q = record["quote"]
     공종별: dict[str, int] = defaultdict(int)
     unmapped = []
+    door_unknown = False
     for s in q["sections"]:
         if s["amount"] <= 0:
             continue
         if s["공종"] == 매핑_불가:
             unmapped.append({"항목": s["name"], "금액": s["amount"]})
-        else:
-            공종별[s["공종"]] += s["amount"]
+            continue
+        # 섹션의 "도어"는 그 섹션 금액 중 도어(문짝·문틀·부속과 그 시공비)의 몫이다. 견적서가 도어를 창호공사에
+        # 넣기도 하고 목공에 넣기도 해서, 섹션 단위로는 창호(샷시)·목공과 도어를 가를 수 없다.
+        # None이면 확인하지 못한 것 — 떼지 않고 섹션의 공종에 둔다.
+        door = s.get("도어") if s["공종"] in 도어_섹션_공종 else 0
+        if door is None:
+            door_unknown, door = True, 0
+        if door:
+            공종별["도어"] += door
+        if s["amount"] - door > 0:
+            공종별[s["공종"]] += s["amount"] - door
     공종별 = {g: 공종별[g] for g in 공종_순서 if g in 공종별}
     직접비, 총액 = q["직접비_합계"], q["총액_부가세제외"]
     매핑불가_합 = sum(m["금액"] for m in unmapped)
@@ -159,9 +175,13 @@ def derive(record: dict) -> None:
         "비교_총액": round(총액 - 매핑불가_합 * 총액 / 직접비) if 직접비 else 총액,
         "비교_직접비": 직접비 - 매핑불가_합,
     }
-    flags = [f for f in record["flags"] if f != "매핑불가_10%초과"]
+    # 창호_도어만은 규칙 1.0의 플래그다. 도어를 떼면 그 견적은 공종이 "도어"뿐이라 플래그가 필요 없다
+    flags = [f for f in record["flags"] if f not in ("매핑불가_10%초과", 도어_미확인_플래그)
+             and not (f == "창호_도어만" and not door_unknown and "창호" not in 공종별)]
     if 직접비 and 매핑불가_합 > 직접비 * 0.10:
         flags.append("매핑불가_10%초과")
+    if door_unknown:
+        flags.append(도어_미확인_플래그)
     record["flags"] = flags
 
     inp = record["input"]
@@ -376,6 +396,13 @@ def check_record(record: dict) -> list[str]:
     unknown = sorted({s["공종"] for s in q["sections"]} - set(공종_순서) - {매핑_불가})
     if unknown:
         problems.append(f"알 수 없는 공종: {unknown}")
+    for s in q["sections"]:
+        if s["공종"] not in 도어_섹션_공종:
+            continue
+        if "도어" not in s:
+            problems.append(f"{s['name']}: 도어 금액이 없음 (없으면 0, 확인 못 했으면 null)")
+        elif s["도어"] is not None and not 0 <= s["도어"] <= s["amount"]:
+            problems.append(f"{s['name']}: 도어 금액({s['도어']:,})이 섹션 금액({s['amount']:,})을 벗어남")
     섹션합 = sum(s["amount"] for s in q["sections"])
     if 섹션합 != q["직접비_합계"]:
         problems.append(f"섹션 합({섹션합:,}) ≠ 직접비 합계({q['직접비_합계']:,})")

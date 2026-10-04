@@ -1,4 +1,4 @@
-"""EstimateEngine.retrieve_cases()(Stage 1~5 점진적 필터 + 하이브리드 리랭킹, 실제
+"""EstimateEngine.retrieve_cases()(단계별 점진적 필터 + 하이브리드 리랭킹, 실제
 production 경로 그대로)의 최종 top-15가 실제로 얼마나 정확한지 측정한다.
 
 eval/retrieval_eval.py와는 다른 걸 잰다 — 그쪽은 "필터 없는 벡터 검색 top-20" 안에서

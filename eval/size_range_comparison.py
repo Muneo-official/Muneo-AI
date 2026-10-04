@@ -124,16 +124,16 @@ async def collect(size_ranges: list[int]) -> None:
 
                 # 필터 통과 후보 수: 벡터 후보 풀(40건 캡)과 무관하게 조건을 만족하는 전체 사례 수.
                 # 채택 Stage의 조건 + 비주거 제외($match와 동일)로 센다.
-                flags = [(True, True, True, True), (True, True, True, False), (True, False, True, False),
-                         (False, False, True, False), (False, False, False, False)][(stage or 5) - 1]
+                # 엔진의 단계 표를 그대로 쓴다. 표에 없는 번호(마지막 폴백)는 조건 없음
+                all_stages = [*ee.RETRIEVAL_STAGES, (False, False, False)]
+                flags = all_stages[(stage or len(all_stages)) - 1]
                 지역들 = ee.REGION_MAP.get(inp.get("지역", "서울"), ["서울"])
-                grade = ee.자재등급_TO_GRADE.get(inp.get("자재등급", "중급"), "중급")
                 mf = engine._build_filter(int(inp.get("평수") or 0), 지역들, inp.get("공종", []),
-                                          use_size=flags[0], use_region=flags[1], use_has=flags[2],
-                                          use_grade=flags[3], grade=grade)
-                # 참고용: Stage 2 조건(평수+지역+공종) 통과 수 — 허용치별 사례 확보량 비교용
+                                          use_size=flags[0], use_region=flags[1], use_has=flags[2])
+                # 참고용: 평수+지역+공종 조건(Stage 1) 통과 수 — 허용치별 사례 확보량 비교용.
+                # 변수와 결과 키의 "stage2"는 자재등급 단계가 있던 때의 번호다
                 mf2 = engine._build_filter(int(inp.get("평수") or 0), 지역들, inp.get("공종", []),
-                                           use_size=True, use_region=True, use_has=True, use_grade=False)
+                                           use_size=True, use_region=True, use_has=True)
                 resid = {"is_non_residential": {"$ne": True}}
                 n_adopted = await col.count_documents({"$and": [mf, resid]} if mf else resid)
                 n_stage2 = await col.count_documents({"$and": [mf2, resid]})
