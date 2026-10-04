@@ -12,7 +12,8 @@ eval/quote_benchmark.py — 가견적 채점: 정답셋의 입력으로 엔진�
 보는 값
   - 총액 오차율: (엔진 중간값 − 정답) / 정답. 절대값의 중앙값과 과대·과소 건수
   - 범위 적중률: 정답이 [최소, 최대] 안에 든 비율. 범위를 넓게 부르면 올라가므로 폭((최대−최소)/중간)과 함께 본다
-  - 총액은 간접비 포함 기준과 직접비 기준 두 가지로 채점한다 — 코퍼스의 total_cost에 간접비 포함 여부가 섞여 있다
+  - 주 지표는 공사비(직접비) 기준이다 — 가견적은 견적서의 공사비만 대상으로 하고 이윤·보험료·부가세는 뺀다.
+    간접비 포함 기준은 참고로 함께 낸다(코퍼스의 total_cost에 간접비 포함 여부가 섞여 있다)
   - 전체 시공과 부분 시공은 총액 산출 경로가 달라 나눠서 보고, 플래그가 붙은 건을 뺀 값도 함께 낸다
   - 구간은 정답 레코드 단위 부트스트랩 95%
   - 엔진이 견적을 못 낸 건은 적중률에서 '벗어남'으로 센다 — 빼고 세면 어려운 건을 실패시키는 변경이 개선처럼 보인다
@@ -74,12 +75,14 @@ class LeaveOutCaseRepository(CaseRepository):
         return len(self.left_out_ids)
 
     async def vector_search(self, query_embedding, mongo_filter, limit, num_candidates=150):
+        fetch = limit + len(self.left_out_ids)
         stage: dict = {
             "index": self._index_name,
             "path": "embedding",
             "queryVector": query_embedding,
-            "numCandidates": num_candidates,
-            "limit": limit + len(self.left_out_ids),
+            # $vectorSearch의 limit은 numCandidates를 넘을 수 없다. 더 가져오는 만큼 같이 늘린다
+            "numCandidates": max(num_candidates, fetch),
+            "limit": fetch,
         }
         if mongo_filter:
             stage["filter"] = mongo_filter
@@ -218,13 +221,13 @@ def _summary_line(name: str, s: dict) -> str:
 
 
 def print_report(rows: list[dict], summary: dict) -> None:
-    print(f"\n{'id':<8}{'범위':<5}{'사례':>4}  {'총액(간접비 포함)':<22}{'직접비 기준':<22}flags")
+    print(f"\n{'id':<8}{'범위':<5}{'사례':>4}  {'공사비 기준':<22}{'간접비 포함(참고)':<22}flags")
     for r in rows:
         if "실패" in r:
             print(f"{r['id']:<8}{r['시공범위']:<5}  실패: {r['실패']}")
             continue
         cells = []
-        for key in ("총액", "직접비"):
+        for key in ("직접비", "총액"):
             s = r[key]
             if s is None:  # 비교할 정답 금액이 0 이하인 건
                 cells.append("채점 불가")
@@ -232,7 +235,7 @@ def print_report(rows: list[dict], summary: dict) -> None:
             cells.append(f"{_pct(s['오차율'], signed=True):>5} {'적중' if s['적중'] else '벗어남':<4} 폭 {_pct(s['폭']):<6}")
         print(f"{r['id']:<8}{r['시공범위']:<5}{r['참고_사례_수']:>4}  {cells[0]:<22}{cells[1]:<22}{','.join(r['flags'])}")
 
-    for key, title in (("총액", "총액 — 간접비 포함 기준"), ("직접비", "총액 — 직접비 기준")):
+    for key, title in (("직접비", "총액 — 공사비 기준 (주 지표)"), ("총액", "총액 — 간접비 포함 기준 (참고)")):
         print(f"\n[{title}]")
         for name, s in summary[key].items():
             print(_summary_line(name, s))
@@ -240,8 +243,8 @@ def print_report(rows: list[dict], summary: dict) -> None:
     for g, s in summary["공종별"].items():
         print(_summary_line(g, s))
 
-    print(f"\n범위 적중률 목표 {TARGET_HIT_RATE:.0%} / 실제 {_pct(summary['총액']['전체'].get('적중률'))} (간접비 포함), "
-          f"{_pct(summary['직접비']['전체'].get('적중률'))} (직접비)")
+    print(f"\n범위 적중률 목표 {TARGET_HIT_RATE:.0%} / 실제 {_pct(summary['직접비']['전체'].get('적중률'))} (공사비 기준), "
+          f"{_pct(summary['총액']['전체'].get('적중률'))} (간접비 포함)")
     if summary["실패"]:
         print(f"견적을 못 낸 건: {summary['실패']}")
 

@@ -25,7 +25,8 @@ class CaseRepository:
             "index": self._index_name,
             "path": "embedding",
             "queryVector": query_embedding,
-            "numCandidates": num_candidates,
+            # limit이 numCandidates보다 크면 $vectorSearch가 오류를 낸다
+            "numCandidates": max(num_candidates, limit),
             "limit": limit,
         }
         if mongo_filter:
