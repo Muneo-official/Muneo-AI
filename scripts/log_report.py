@@ -85,9 +85,11 @@ def main() -> None:
     if retrieve:
         fallback_count = sum(1 for e in retrieve if e.get("fallback"))
         print(f"\nretrieve_cases: {len(retrieve)}건, "
-              f"Stage 5(필터 없음) 폴백 {fallback_count}건 ({fallback_count / len(retrieve):.1%})")
+              f"필터 없음 폴백 {fallback_count}건 ({fallback_count / len(retrieve):.1%})")
         stage_counts = Counter(e.get("stage") for e in retrieve)
-        print(f"  Stage별 분포: {dict(sorted(stage_counts.items()))}")
+        # 엔진 1.5.0에서 자재등급 단계가 빠져 번호가 하나씩 당겨졌다(예전 Stage 3 지역 완화 → 지금 Stage 2).
+        # 배포 전후의 로그가 섞여 있으면 같은 번호가 다른 단계를 뜻한다
+        print(f"  Stage별 분포: {dict(sorted(stage_counts.items(), key=lambda kv: str(kv[0])))}")
 
     no_match = [e for e in events if e.get("event") == "generate_no_match"]
     if no_match:

@@ -139,3 +139,44 @@ def test_품명_정리_규칙을_정규화된_공종_이름으로도_찾는다()
     assert EstimateEngine._normalize_desc("전기", "거실 다운라이트 3인치") == ("다운라이트", True)
     assert EstimateEngine._normalize_desc("조명공사", "거실 다운라이트 3인치") == ("다운라이트", True)
     assert EstimateEngine._normalize_desc("창호", "현관중문 3연동") == ("중문", True)
+
+
+def test_견적서_표기가_남은_품목은_그_공종의_규칙만_쓴다():
+    # 수전공사·도기공사·설비공사는 모두 "설비"로 정규화된다. 규칙을 섞으면 수전공사의 "세면기 수전"이
+    # 도기공사의 "세면기" 규칙에 걸려 세면기 금액과 한 줄로 묶인다
+    assert EstimateEngine._normalize_desc("수전공사", "세면기 수전")[0] != "세면기"
+    assert EstimateEngine._normalize_desc("조명공사", "다운라이트 설치 인건비") == ("다운라이트", True)
+
+
+def test_정규화된_공종의_품목은_구체적인_규칙이_인건비_부자재보다_먼저다():
+    # "전기"에는 전기공사와 조명공사의 규칙이 이어진다. 앞 목록의 "인건비"가 뒤 목록의 "다운라이트"를 가로채면 안 된다
+    assert EstimateEngine._normalize_desc("전기", "다운라이트 설치 인건비") == ("다운라이트", True)
+    assert EstimateEngine._normalize_desc("전기", "인건비") == ("인건비", True)
+
+
+async def test_도어공사에_적힌_가구_문짝은_창호_명세에_넣지_않는다():
+    cases = [{"article_id": "0"}, {"article_id": "1"}]
+    docs = {aid: {"parsed_estimate": {"line_items": [
+        {"category": "도어공사", "description": "붙박이장 문짝 교체", "amount": 900_000},
+        {"category": "창호", "description": "KCC 샷시 22mm", "amount": 6_000_000}]}} for aid in ("0", "1")}
+    spec = await _engine(_Repo(cases, docs)).collect_line_items(cases, ["창호"])
+
+    assert [row["description"] for row in spec["창호"]] == ["샷시/새시"]
+
+
+async def test_공종_없이_부르는_리스크_진단의_검색도_자재등급으로_거르지_않는다():
+    # 가격 비교는 자재등급 "중급" 고정으로 사례 검색을 부른다. 등급이 있는 사례 3~5건이 아니라 같은 지역·평수의 사례와 비교한다
+    repo = _Repo([_case(i) for i in range(15)])
+    cases = await _engine(repo).retrieve_cases("30평 서울 리모델링", {"평수": 30, "지역": "서울", "자재등급": "중급", "시공범위": "부분", "공종": []})
+
+    assert len(cases) == 15
+    assert all("material_grade" not in json.dumps(f, ensure_ascii=False) for f in repo.filters)
+
+
+async def test_조건을_다_풀어도_모자라면_조건_없이_한_번만_찾는다():
+    repo = _Repo([_case(0), _case(1)])  # 어느 단계에서도 3건이 안 된다
+    cases = await _engine(repo).retrieve_cases("30평 서울 리모델링", _input())
+
+    assert len(cases) == 2
+    assert repo.filters[-1] is None and repo.filters.count(None) == 1
+    assert len(repo.filters) == 4  # 평수+지역+공종 → 지역 완화 → 평수 완화 → 조건 없음

@@ -22,7 +22,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from sentence_transformers import CrossEncoder, SentenceTransformer
 
 from app.core.config import get_settings
-from app.domain.estimate_engine import REGION_MAP, 자재등급_TO_GRADE, EstimateEngine
+from app.domain.estimate_engine import REGION_MAP, RETRIEVAL_STAGES, EstimateEngine
 from app.repositories.case_repository import CaseRepository
 
 load_dotenv()
@@ -30,13 +30,8 @@ load_dotenv()
 QUERIES_PATH = pathlib.Path(__file__).parent / "test_inputs" / "queries.json"
 LABELS_CSV_PATH = pathlib.Path(__file__).parent / "test_inputs" / "labels.csv"
 
-STAGE_CONFIGS = [
-    (True, True, True, True),
-    (True, True, True, False),
-    (True, False, True, False),
-    (False, False, True, False),
-    (False, False, False, False),
-]
+# 엔진의 단계 표를 그대로 쓰고, 마지막에 조건 없는 검색을 붙인다(retrieve_cases()의 마지막 폴백)
+STAGE_CONFIGS = [*RETRIEVAL_STAGES, (False, False, False)]
 
 
 async def resolve_filtered_candidates(engine: EstimateEngine, repo: CaseRepository, inp: dict, pool_n: int):
@@ -48,13 +43,11 @@ async def resolve_filtered_candidates(engine: EstimateEngine, repo: CaseReposito
     평수 = int(inp.get("평수") or 0)
     지역들 = REGION_MAP.get(inp.get("지역", "서울"), ["서울"])
     공종들 = inp.get("공종", [])
-    grade = 자재등급_TO_GRADE.get(inp.get("자재등급", "중급"), "중급")
 
-    for use_size, use_region, use_has, use_grade in STAGE_CONFIGS:
+    for use_size, use_region, use_has in STAGE_CONFIGS:
         mongo_filter = engine._build_filter(
             평수, 지역들, 공종들,
             use_size=use_size, use_region=use_region, use_has=use_has,
-            use_grade=use_grade, grade=grade,
         )
         cases = await repo.vector_search(query_embedding, mongo_filter, pool_n)
         if len(cases) >= 3:

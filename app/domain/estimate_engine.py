@@ -20,7 +20,7 @@ from starlette.concurrency import run_in_threadpool
 from app.core.logging import log_event
 from app.repositories.case_repository import CaseRepository
 from pipeline.aggregation import DOOR_CATEGORY, DOOR_SOURCE_CATEGORIES, is_door_item
-from pipeline.categories import normalize_category
+from pipeline.categories import FURNITURE_DOOR_KEYWORDS, normalize_category
 
 # ══════════════════════════════════════════════════════
 # 설정
@@ -36,8 +36,8 @@ CASE_TEXT_REQUEST_CAP = 60  # _case_text()의 요청글 트렁케이션 길이. 
 SIZE_RANGE         = 6    # 평수 ±6평 필터 — 7→5(a39eaf4)를 거쳐 6으로 조정. 라벨상 relevant 비율이
                            # 평수차 6평 65.5% → 7평 22.2%로 6과 7 사이에서 급락한다.
                            # eval/results/size_range_comparison.md: ±5와 P@15 동일(93.1%, 차이는 노이즈
-                           # 범위), 대신 쿼리당 후보가 늘고(중앙값 15→19) Stage 2 통과가 3건 미만이라
-                           # 지역 조건까지 풀리던(Stage 3) 쿼리가 없어짐. ±7은 −10.8%p로 확실히 나쁨.
+                           # 범위), 대신 쿼리당 후보가 늘고(중앙값 15→19) 평수+지역+공종 조건 통과가 3건
+                           # 미만이라 지역 조건까지 풀리던 쿼리가 없어짐. ±7은 −10.8%p로 확실히 나쁨.
                            # 라벨 규칙(_suggested_relevant)은 순환 방지를 위해 ±5 그대로 둔다.
 MAX_SPEC_ITEMS     = 12   # 공종별 명세 최대 항목 수 (ancillary 제외)
 SPEC_RATIO         = 0.15 # 비정규화 항목 등장 비율 threshold (전체 사례 수 × 비율)
@@ -153,7 +153,7 @@ REGION_MAP = {
     "장판":  {"강마루"},
     "주방":  {"붙박이장", "신발장", "수납장", "현관장", "키큰장"},
     "가구":  {"싱크대", "냉장고장", "후드", "주방수전"},
-    "욕실":  {"거실바닥타일"},
+    "욕실":  {"거실바닥타일", "보일러", "난방배관"},  # 설비로 분류된 품목 중 욕실 공사가 아닌 것
 }
 
 NORM_MAP = {
@@ -327,11 +327,17 @@ NORM_MAP = {
     ],
 }
 
-# 품명 정리 규칙을 정규화된 공종 이름으로 찾기 위한 표. NORM_MAP의 키는 견적서 표기("수전공사", "조명공사")인데
-# 코퍼스 품목의 공종은 대부분 정규화된 이름("설비", "전기")이다. 같은 이름으로 정규화되는 키의 규칙은 차례로 잇는다.
+# 품목의 공종이 정규화된 이름("설비", "전기")일 때 쓰는 품명 정리 규칙. NORM_MAP의 키는 견적서 표기("수전공사",
+# "조명공사")인데 코퍼스 품목의 공종은 대부분 정규화된 이름이다. 같은 이름으로 정규화되는 키의 규칙을 잇되,
+# 인건비·부자재·운송비처럼 어느 품목에나 붙는 낱말의 규칙은 맨 뒤로 보낸다 — 앞 목록의 "인건비" 규칙이 뒤 목록의
+# 구체적인 규칙("다운라이트")을 가로채지 않게. 견적서 표기가 남아 있는 품목은 NORM_MAP을 그대로 쓴다.
+_GENERIC_SPEC_LABELS = {"인건비", "부자재", "운송비"}
 _NORM_RULES: dict[str, list] = {}
 for _raw_category, _rules in NORM_MAP.items():
     _NORM_RULES.setdefault(normalize_category(_raw_category) or _raw_category, []).extend(_rules)
+for _category, _rules in _NORM_RULES.items():
+    _NORM_RULES[_category] = ([r for r in _rules if r[1] not in _GENERIC_SPEC_LABELS]
+                              + [r for r in _rules if r[1] in _GENERIC_SPEC_LABELS])
 
 _SKIP_KEYWORDS = ["식대", "주차", "통행료"]
 
@@ -372,7 +378,15 @@ DEFAULT_COEFFICIENTS: dict[str, dict | float] = {
     "wallpaper_type": {"실크벽지": 1.00, "합지벽지": 0.75, "천연벽지": 1.40},
 }
 
-자재등급_TO_GRADE = {"일반": "일반", "중급": "중급", "고급": "고급"}
+# retrieve_cases()가 조건을 풀어 가는 순서 — (평수, 지역, 공종 플래그) 조건을 쓸지. 여기서 3건 이상 못 찾으면
+# 마지막으로 조건 없이 찾는다(Stage 4). 평가 스크립트는 이 표를 복사하지 말고 가져다 쓴다.
+# 엔진 1.5.0에서 자재등급 단계를 없애 번호가 하나씩 당겨졌다: 예전 Stage 2(등급 완화) → 지금 Stage 1,
+# 예전 Stage 3(지역 완화) → 지금 Stage 2. 로그의 stage 값을 볼 때 엔진 버전을 함께 본다.
+RETRIEVAL_STAGES: list[tuple[bool, bool, bool]] = [
+    (True,  True,  True),   # Stage 1: 평수 + 지역 + 공종
+    (True,  False, True),   # Stage 2: 지역 완화
+    (False, False, True),   # Stage 3: 평수 완화
+]
 
 전체_LO_MARGIN = 0.20
 전체_HI_MARGIN = 0.46
@@ -465,7 +479,10 @@ class EstimateEngine:
         for kw in _SKIP_KEYWORDS:
             if kw in desc:
                 return None, False
-        rules = _NORM_RULES.get(normalize_category(category or "") or category, [])
+        if category in NORM_MAP:  # 견적서 표기가 남아 있는 품목은 그 공종의 규칙만 쓴다
+            rules = NORM_MAP[category]
+        else:
+            rules = _NORM_RULES.get(normalize_category(category or "") or category, [])
         for keywords, normalized in rules:
             if any(kw in desc for kw in keywords):
                 return normalized, (normalized is not None)
@@ -601,14 +618,17 @@ class EstimateEngine:
                 norm_cat = normalize_category(source_cat) or source_cat
                 is_door = norm_cat in DOOR_SOURCE_CATEGORIES and is_door_item(item.get("description") or "")
                 cat = DOOR_CATEGORY if is_door else norm_cat
+                # 도어공사에 적힌 가구 문짝(붙박이장 등)은 도어도 창호도 아니다 — 창호 명세에 섞이지 않게 뺀다
+                if not is_door and norm_cat == "창호" and any(kw in (item.get("description") or "") for kw in FURNITURE_DOOR_KEYWORDS):
+                    continue
                 if cat not in target_categories:
                     continue
                 amt = int(item.get("amount") or 0)
                 if amt <= 0:
                     continue
                 desc = self._normalize_spec_desc(item.get("description") or "")
-                # 품명 정리 규칙은 도어로 묶기 전의 공종으로 찾는다 — 중문·방문·문틀 규칙이 창호·목공에 있다
-                normalized, was_norm = self._normalize_desc(norm_cat, desc)
+                # 품명 정리 규칙은 도어로 묶기 전의, 품목에 적힌 공종으로 찾는다 — 중문·방문·문틀 규칙이 창호·목공에 있다
+                normalized, was_norm = self._normalize_desc(source_cat, desc)
                 if normalized is None:
                     continue
                 amounts[cat][(normalized, was_norm)].append(amt)
@@ -690,8 +710,7 @@ class EstimateEngine:
     # ── 2. Mongo(Atlas Vector Search) 필터 생성 (점진적 완화) ──
 
     def _build_filter(self, 평수: int, 지역들: list, 공종들: list,
-                      use_size=True, use_region=True, use_has=True,
-                      use_grade=False, grade: str = None):
+                      use_size=True, use_region=True, use_has=True):
         conds = []
         if use_size and 평수:
             conds.append({"size_pyeong": {"$gte": 평수 - SIZE_RANGE, "$lte": 평수 + SIZE_RANGE}})
@@ -700,8 +719,6 @@ class EstimateEngine:
                 conds.append({"region": {"$eq": 지역들[0]}})
             else:
                 conds.append({"region": {"$in": 지역들}})
-        if use_grade and grade:
-            conds.append({"material_grade": {"$eq": grade}})
         if use_has:
             seen = set()
             for 공종 in 공종들:
@@ -808,13 +825,6 @@ class EstimateEngine:
         # 임베딩 계산은 CPU-bound 블로킹 연산이므로 이벤트 루프를 막지 않도록 threadpool에서 실행
         query_embedding = (await run_in_threadpool(self._embedder.encode, query)).tolist()
 
-        stages = [
-            (True,  True,  True),   # Stage 1: 전체 조건
-            (True,  False, True),   # Stage 2: 지역 완화
-            (False, False, True),   # Stage 3: 평수 완화
-            (False, False, False),  # Stage 4: 필터 없음
-        ]
-
         def stage_filter(flags: tuple[bool, bool, bool]) -> dict | None:
             use_size, use_region, use_has = flags
             return self._build_filter(평수, 지역들, 공종들, use_size=use_size, use_region=use_region, use_has=use_has)
@@ -826,12 +836,12 @@ class EstimateEngine:
         if inp.get("시공범위", "부분") == "부분" and self._is_partial_request(산출_공종들):
             # 같은 지역·평수 조건(Stage 1의 필터)으로 한 번만 찾는다. 지역을 풀면 서울 요청이 지방 가격으로
             # 나온다 — 지역 계수는 "필터가 같은 지역 사례를 가져온다"는 전제로 적용하지 않고 있다.
-            partial = await self._retrieve_partial_cases(query, query_embedding, stage_filter(stages[0]),
+            partial = await self._retrieve_partial_cases(query, query_embedding, stage_filter(RETRIEVAL_STAGES[0]),
                                                          산출_공종들, total)
             if partial is not None:
                 return partial
 
-        for stage, flags in enumerate(stages, start=1):
+        for stage, flags in enumerate(RETRIEVAL_STAGES, start=1):
             try:
                 cases = await self._cases.vector_search(query_embedding, stage_filter(flags), pool_n)
                 if len(cases) >= 3:
@@ -844,7 +854,8 @@ class EstimateEngine:
 
         cases = await self._cases.vector_search(query_embedding, None, pool_n)
         reranked = await self._hybrid_rerank(query, cases)
-        log_event("retrieve_cases", stage=len(stages), pool_size=len(cases), case_count=len(reranked), fallback=True)
+        log_event("retrieve_cases", stage=len(RETRIEVAL_STAGES) + 1, pool_size=len(cases),
+                  case_count=len(reranked), fallback=True)
         return reranked
 
     # ── 3. 사례에서 비용 추출 ────────────────────────────
@@ -1003,8 +1014,8 @@ class EstimateEngine:
     def cost_range(values, max_ratio: float = None):
         """IQR 기반 범위: 최솟값=P25, 최댓값=P75, 중간=전체 중앙값.
 
-        max_ratio를 주면 최대/최소가 그 비율을 넘지 않게 중간값에서 위아래로 같은 비율(√max_ratio)까지만
-        허용한다. 예전에는 최소를 그대로 두고 최대만 최소 × max_ratio로 깎았는데, P25가 낮으면 깎은 최대가
+        max_ratio를 주고 최대/최소가 그 비율을 넘으면, 중간값에서 위아래로 같은 비율(√max_ratio)까지만
+        남긴다. 비율 안에 있는 범위는 건드리지 않는다. 예전에는 최소를 그대로 두고 최대만 최소 × max_ratio로 깎았는데, P25가 낮으면 깎은 최대가
         중간값보다 작아져 중간값을 최대로 쓰게 됐다 — "최소 90만 / 중간 184만 / 최대 184만"처럼 중간값이
         끝값과 같은 범위가 공종 범위 다섯 개 중 하나꼴로 나왔다.
         """
@@ -1018,7 +1029,7 @@ class EstimateEngine:
         else:
             lo = s[n // 4]
             hi = s[(3 * n) // 4]
-        if max_ratio is not None and mid > 0:
+        if max_ratio is not None and mid > 0 and hi > lo * max_ratio:
             side = max_ratio ** 0.5
             lo = max(lo, int(mid / side))
             hi = min(hi, int(mid * side))
