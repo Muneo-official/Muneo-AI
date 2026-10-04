@@ -9,6 +9,8 @@ import copy
 
 from eval.quote_ground_truth import _scope, check_record, derive
 
+_DOOR = {"창호공사": {"도어": 3_000_000}, "목공사": {"도어": 0}}
+
 
 def _record() -> dict:
     """확장공사(매핑 불가)가 있고 욕실·전기가 두 섹션으로 나뉜 전체 시공 견적서 한 장."""
@@ -22,7 +24,8 @@ def _record() -> dict:
     record = {
         "id": "gt-test", "status": "verified", "split": "dev",
         "quote": {
-            "sections": [{"name": n, "amount": a, "공종": g} for n, a, g in sections],
+            # 창호공사 15,000,000 중 3,000,000이 도어, 목공사에는 도어가 없다
+            "sections": [{"name": n, "amount": a, "공종": g, **_DOOR.get(n, {})} for n, a, g in sections],
             "직접비_합계": 45_000_000,
             "간접비_내역": {"이윤": 3_150_000, "보험료": 684_000, "단수": -4_000},
             "총액_부가세제외": 48_830_000,
@@ -73,7 +76,7 @@ def test_매핑_불가가_직접비의_10퍼센트를_넘으면_플래그를_붙
 def test_입력의_공종_시공범위_철거여부_옵션은_정답_공종에서_정한다():
     inp = _record()["input"]
 
-    assert inp["공종"] == ["창호", "욕실", "가구", "전기/조명", "필름", "장판", "도배", "목공", "철거", "마감/공과잡비"]
+    assert inp["공종"] == ["창호", "도어", "욕실", "가구", "전기/조명", "필름", "장판", "도배", "목공", "철거", "마감/공과잡비"]
     assert inp["시공범위"] == "전체"
     assert inp["철거여부"] == "있음"
     assert "마루" not in inp  # 바닥이 장판이므로 마루 옵션은 지운다
@@ -85,6 +88,9 @@ def test_시공범위는_같은_공종을_한_번만_센다():
     assert _scope(["욕실", "욕실", "욕실", "도배", "장판", "창호", "매핑 불가", "마감/공과잡비"]) == "부분"
     assert _scope(["욕실", "도배", "장판", "창호", "가구", "목공"]) == "전체"
     assert _scope(["욕실", "도배", "창호", "가구", "목공", "철거"]) == "부분"  # 바닥이 없으면 부분
+    # 도어는 창호와 한 공종으로 센다. 따로 세면 공종 5개짜리가 6개가 돼 전체로 바뀐다
+    assert _scope(["욕실", "도배", "장판", "창호", "도어", "가구"]) == "부분"
+    assert _scope(["욕실", "도배", "장판", "도어", "가구", "목공"]) == "전체"
 
 
 def test_검산을_통과한_레코드는_문제가_없다():
@@ -127,3 +133,66 @@ def test_검수_완료인데_초안_흔적이_남아_있으면_잡아낸다():
 
     assert any("미확인" in p for p in problems)
     assert any("초안 전용 플래그" in p for p in problems)
+
+
+# ── 도어 분리 (규칙 1.1) ──────────────────────────────────────────────────
+
+
+def test_섹션의_도어_금액은_도어_공종으로_떼어_낸다():
+    truth = _record()["truth"]
+
+    assert truth["공종별"]["창호"] == 15_000_000 - 3_000_000
+    assert truth["공종별"]["도어"] == 3_000_000
+    assert truth["공종별"]["목공"] == 1_500_000
+    assert sum(truth["공종별"].values()) + 6_000_000 == truth["직접비_합계"]  # 떼어도 합은 그대로
+
+
+def test_목공_섹션에_든_도어도_도어_공종으로_모은다():
+    record = _record()
+    record["quote"]["sections"][10]["도어"] = 500_000  # 목공사 1,500,000 중 도어 500,000
+    derive(record)
+
+    assert record["truth"]["공종별"]["목공"] == 1_000_000
+    assert record["truth"]["공종별"]["도어"] == 3_000_000 + 500_000
+
+
+def test_창호_섹션이_도어뿐이면_창호_공종은_없고_플래그도_지운다():
+    record = _record()
+    record["quote"]["sections"][1]["도어"] = 15_000_000
+    record["flags"].append("창호_도어만")  # 규칙 1.0에서 붙였던 플래그
+    derive(record)
+
+    assert "창호" not in record["truth"]["공종별"]
+    assert "창호" not in record["input"]["공종"] and "도어" in record["input"]["공종"]
+    assert "창호_도어만" not in record["flags"]
+
+
+def test_도어를_확인하지_못한_섹션은_떼지_않고_플래그를_붙인다():
+    record = _record()
+    record["quote"]["sections"][1]["도어"] = None
+    derive(record)
+
+    assert record["truth"]["공종별"]["창호"] == 15_000_000
+    assert "도어" not in record["truth"]["공종별"]
+    assert "도어_미확인" in record["flags"]
+    assert check_record(record) == []  # 확인 못 한 것은 문제가 아니라 플래그로 남긴다
+
+    record["quote"]["sections"][1]["도어"] = 3_000_000  # 확인하면 플래그가 사라진다
+    derive(record)
+    assert "도어_미확인" not in record["flags"]
+
+
+def test_창호_목공_섹션에_도어_금액을_안_적으면_잡아낸다():
+    record = _record()
+    del record["quote"]["sections"][10]["도어"]
+    derive(record)
+
+    assert any("도어 금액이 없음" in p for p in check_record(record))
+
+
+def test_도어_금액이_섹션_금액보다_크면_잡아낸다():
+    record = _record()
+    record["quote"]["sections"][10]["도어"] = 2_000_000  # 목공사는 1,500,000
+    derive(record)
+
+    assert any("벗어남" in p for p in check_record(record))
