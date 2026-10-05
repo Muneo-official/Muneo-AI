@@ -26,7 +26,7 @@ from pipeline.categories import FURNITURE_DOOR_KEYWORDS, normalize_category
 # 설정
 # ══════════════════════════════════════════════════════
 
-ENGINE_VERSION     = "1.5.0"  # 저장된 견적의 재현성 추적용 (estimates.engine_version)
+ENGINE_VERSION     = "1.6.0"  # 저장된 견적의 재현성 추적용 (estimates.engine_version)
 TOP_K              = 15   # 최종 유사 사례 수 (리랭킹 이후)
 RERANK_POOL        = 20   # RRF 결합 이후, cross-encoder에 넣을 후보 수
 CASE_TEXT_REQUEST_CAP = 60  # _case_text()의 요청글 트렁케이션 길이. 캡이 넉넉할수록(예: 300)
@@ -42,6 +42,9 @@ SIZE_RANGE         = 6    # 평수 ±6평 필터 — 7→5(a39eaf4)를 거쳐 6�
 MAX_SPEC_ITEMS     = 12   # 공종별 명세 최대 항목 수 (ancillary 제외)
 SPEC_RATIO         = 0.15 # 비정규화 항목 등장 비율 threshold (전체 사례 수 × 비율)
 SCOPE_COVERAGE_MIN = 0.40 # 요청 공종 비용 합계 / 사례 총 비용 최소 비율 (전체 시공용)
+FINISHING_COST_KEY = "cost_공과잡비"  # 사례의 마감/공과잡비 금액. 입력 공종 "마감/공과잡비"에 대응한다
+CASE_AMOUNT_MIN_VALUES = 3  # 요청 공종 밖의 금액(공과잡비, 철거)을 사례에서 가져와 총액에 더할 때, 그 금액이 있는
+                            # 사례가 이 수 이상이어야 한다. 적으면 한 건에 흔들리므로 비율·평당 보정으로 낸다
 PARTIAL_SCOPE_POOL = 150  # 부분 시공 요청에서 부분 시공 사례를 고르기 위해 가져오는 후보 수. 부분 시공 사례는
                           # 코퍼스의 약 17%라 기본 후보 풀(40)로는 3건을 채우기 어렵다. $vectorSearch의
                           # limit은 numCandidates(150)를 넘을 수 없다.
@@ -408,8 +411,11 @@ def _margin_scale(n_cases: int) -> tuple[float, float]:
 def _total_range(mid: int, lo_margin: float, hi_margin: float, n_cases: int) -> tuple[int, int]:
     """총액의 (최소, 최대). 중간값에서 아래로 lo_margin, 위로 hi_margin만큼 — 사례 수에 따라 축소한다.
 
-    범위는 위로 더 넓다. 코퍼스의 total_cost는 이윤·보험료가 빠진 공사비로 저장된 건이 많아 실제 견적이
-    참고 사례보다 높게 나오는 쪽이 흔하다. 중간값은 이 범위의 중점이 아니라 호출하는 쪽이 넘긴 값 그대로다.
+    범위는 위로 더 넓다. 중간값은 이 범위의 중점이 아니라 호출하는 쪽이 넘긴 값 그대로다.
+
+    위로 넓힌 근거는 총액을 사례의 total_cost로 내던 때의 것이다(이윤·보험료가 빠진 공사비로 저장된 건이 많아
+    실제 견적이 참고 사례보다 높게 나오는 쪽이 흔했다). 총액을 공종별 중간값의 합으로 바꾼 뒤(1.6.0)에는 마진을
+    다시 정하지 않았다.
     """
     lo_scale, hi_scale = _margin_scale(n_cases)
     return int(mid * (1 - lo_margin * lo_scale)), int(mid * (1 + hi_margin * hi_scale))
@@ -1072,40 +1078,63 @@ class EstimateEngine:
                     "최대": int(r["최대"] * factor),
                 }
 
-        # 총액의 "중간"은 참고 사례의 중앙값(보정 반영)이다. 범위의 중점으로 계산하지 않는다 —
-        # 범위가 위로 더 넓어서, 중점을 쓰면 중간값이 참고 사례 중앙값보다 항상 높게 나온다.
-        if 시공범위 == "전체":
-            r = self.cost_range(total_costs)
-            adj_mid = int(r["중간"] * factor) + extra
+        # 총액의 "중간"은 공종별 중간값의 합이다. 전체 시공도 사례의 총금액으로 내지 않는다 — 총금액에는 요청에
+        # 없는 공종(창호·필름 등)과 확장공사, 이윤·보험료가 들어 있어 요청과 무관하게 총액이 높게 나왔다.
+        # 사례마다 요청 공종의 금액을 더한 값의 중앙값도 쓰지 않는다. 그 공종을 하지 않은 사례가 0원으로 들어가,
+        # 참고 사례 절반이 샷시를 하지 않은 요청에서 총액이 공종별 금액의 합보다 크게 낮았다.
+        # 범위는 위로 더 넓어서 중점으로 계산하지 않는다 — 중점을 쓰면 중간값이 항상 높게 나온다.
+        마감_범위 = None
+        마감_비율 = self._coeff("finishing_ratio")
+        공종_합_총액 = bool(공종별_범위)
+        if 공종_합_총액:
+            # 철거를 요청하지 않았으면 공종 합에 철거공사가 없으므로 철거비를 더한다. 전체 시공에서 철거가 있다고
+            # 했으면 참고 사례의 철거 금액을 쓴다 — 평당 보정액은 전체 리모델링의 철거비(코퍼스 중앙값 평당 약
+            # 7.8만 원)의 3분의 1이다. 부분 시공에는 전체 리모델링 사례의 철거 금액이 너무 커서 보정액을 쓴다
+            철거_금액 = cat_costs.get("철거", [])
+            if (시공범위 == "전체" and "철거" not in 공종들 and inp.get("철거여부") == "있음"
+                    and len(철거_금액) >= CASE_AMOUNT_MIN_VALUES):
+                철거_보정 = int(self.cost_range(철거_금액)["중간"] * factor)
+                notes.append(f"철거비 +{철거_보정:,}원 (참고 사례의 철거 금액)")
+            else:
+                철거_보정 = self._demolition_allowance(inp)
+                if 철거_보정:
+                    notes.append(f"철거비 보정 +{철거_보정:,}원")
+            # 장판과 마루는 둘 다 사례의 바닥 금액을 읽는다. 함께 고르면 총액에는 한 번만 넣는다
+            바닥_중복 = {"장판", "마루"} <= 공종별_범위.keys()
+            if 바닥_중복:
+                notes.append("장판·마루는 같은 바닥 금액이라 총액에 한 번만 포함")
+            adj_mid = sum(r["중간"] for g, r in 공종별_범위.items() if not (바닥_중복 and g == "마루")) + extra + 철거_보정
+            if 시공범위 == "전체":
+                # 전체 시공의 마감/공과잡비는 다른 공종처럼 사례의 금액으로 낸다. 금액이 있는 사례가 적으면 한 건에
+                # 흔들리므로 비율로 더한다. 비율이 0이면(마감을 내지 않는 설정) 사례의 금액도 쓰지 않는다
+                마감_금액 = [v for v in (int(c.get(FINISHING_COST_KEY) or 0) for c in cases) if v > 0]
+                if 마감_비율 and len(마감_금액) >= CASE_AMOUNT_MIN_VALUES:
+                    r = self.cost_range(마감_금액, max_ratio=1.8)
+                    마감_범위 = {k: int(v * factor) for k, v in r.items()}
+                    adj_mid += 마감_범위["중간"]
+                    notes.append("마감/공과잡비는 참고 사례의 금액으로 총액에 포함")
+                adj_lo, adj_hi = _total_range(adj_mid, 전체_LO_MARGIN, 전체_HI_MARGIN, len(cases))
+            else:
+                adj_lo, adj_hi = _total_range(adj_mid, 부분_LO_MARGIN, 부분_HI_MARGIN, len(cases))
+        elif 시공범위 == "전체":
+            # 요청 공종의 금액을 가진 사례가 없을 때만 사례의 총금액으로 낸다
+            adj_mid = int(self.cost_range(total_costs)["중간"] * factor) + extra
             adj_lo, adj_hi = _total_range(adj_mid, 전체_LO_MARGIN, 전체_HI_MARGIN, len(cases))
-            마감_가산 = False
-        elif 공종별_범위:
-            # 철거비 보정은 공종 합으로 총액을 낼 때만 더한다. 사례 총금액에는 철거공사가 이미 들어 있다
-            철거_보정 = self._demolition_allowance(inp)
-            if 철거_보정:
-                notes.append(f"철거비 보정 +{철거_보정:,}원")
-            adj_mid = sum(r["중간"] for r in 공종별_범위.values()) + extra + 철거_보정
-            adj_lo, adj_hi = _total_range(adj_mid, 부분_LO_MARGIN, 부분_HI_MARGIN, len(cases))
-            마감_가산 = True
         else:
             r = self.cost_range(total_costs)
             adj_lo = int(r["최소"] * factor) + extra
             adj_mid = int(r["중간"] * factor) + extra
             adj_hi = int(r["최대"] * factor) + extra
-            마감_가산 = False
 
-        # 마감/공과잡비: 사례 총금액에서 구한 총액에는 견적서의 기타공사가 대부분 들어 있어(코퍼스에서
-        # 확인 가능한 사례의 약 3분의 2) 또 더하지 않고 총액 안의 몫으로만 표시한다. 공종 중간값의 합으로
-        # 구한 총액에는 마감이 없으므로 더한다.
-        마감_범위 = None
-        if 마감비율_적용:
-            마감_비율 = self._coeff("finishing_ratio")
+        # 마감/공과잡비를 사례의 금액으로 내지 못했으면 비율로 낸다. 공종 중간값의 합에는 마감이 없으므로 더하고,
+        # 사례의 총금액으로 구한 총액에는 견적서의 기타공사가 대부분 들어 있어 총액 안의 몫으로만 표시한다.
+        if 마감비율_적용 and 마감_범위 is None:
             마감_범위 = {
                 "최소": int(adj_lo * 마감_비율),
                 "중간": int(adj_mid * 마감_비율),
                 "최대": int(adj_hi * 마감_비율),
             }
-            if 마감_가산:
+            if 공종_합_총액:
                 adj_lo = int(adj_lo * (1 + 마감_비율))
                 adj_mid = int(adj_mid * (1 + 마감_비율))
                 adj_hi = int(adj_hi * (1 + 마감_비율))
@@ -1178,6 +1207,8 @@ class EstimateEngine:
             g for g in 추출대상_공종들
             if g not in 공종별_범위
         ]
+        if 데이터_부족_공종 and 공종_합_총액:
+            notes.append(f"{'·'.join(데이터_부족_공종)} 금액은 참고 사례에 없어 총액에 포함되지 않음")
 
         reference_case_ids = sorted({
             str(c.get("article_id")) for c in cases if c.get("article_id")
