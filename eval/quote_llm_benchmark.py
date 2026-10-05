@@ -15,6 +15,7 @@ eval/quote_llm_benchmark.py — 가견적 비교: 정답셋의 같은 입력을 
     (같은 폭 적중률)을 함께 본다
   - 같은 입력이어도 답이 실행마다 달라서 건당 여러 번 부르고, 회차마다 따로 채점해 평균과 최소~최대를 낸다
   - 답을 읽을 수 없거나(JSON 아님, 총액 없음) 거절한 건은 실패 — 적중률에서 '벗어남'으로 센다
+  - 호출 자체가 실패한 건(한도 초과, 네트워크)이 있으면 그 모델은 채점하지 않는다 — 모델의 오답이 아니다
 
 개선용 세트의 점수를 보고 프롬프트를 고치지 않는다. 고치는 것은 형식을 못 지켜 답을 읽을 수 없을 때뿐이다.
 
@@ -35,8 +36,8 @@ import sys
 from dotenv import load_dotenv
 
 from app.schemas.estimate import EstimateRequest
-from eval.quote_benchmark import TARGET_HIT_RATE, score_record, summarize
-from eval.quote_ground_truth import GROUND_TRUTH_PATH, REVIEW_DIR
+from eval.quote_benchmark import TARGET_HIT_RATE, load_records, require_final, score_record, summarize
+from eval.quote_ground_truth import REVIEW_DIR
 
 load_dotenv()
 
@@ -63,16 +64,16 @@ SYSTEM_PROMPT = """당신은 한국의 주거 인테리어 공사 견적 전문�
 공종 정의
 - 창호: 샷시(발코니창·이중창 등 창문) 교체. 문은 넣지 않습니다.
 - 도어: 방문, 중문, 현관문과 문틀.
-- 욕실: 욕실 공사 전체 — 타일, 방수, 도기(양변기·세면대), 수전, 욕실 설비.
+- 욕실: 욕실 공사 전체(도기, 수전, 방수)에 더해, 견적서의 타일공사와 설비공사를 모두 넣습니다. 현관·주방 벽·발코니 타일과 배관 공사도 여기에 넣습니다.
 - 가구: 싱크대를 포함한 주방 가구, 붙박이장, 신발장 등 제작 가구.
 - 전기/조명: 배선, 스위치·콘센트, 조명 기구.
 - 도장: 페인트, 탄성코트.
 - 필름: 인테리어 필름(시트) 시공.
-- 장판: 장판 바닥재. 마루: 마루 바닥재.
+- 장판, 마루: 바닥공사 전체. 바닥재 종류에 따라 둘 중 하나로 요청됩니다.
 - 도배: 벽지 시공.
 - 목공: 몰딩, 걸레받이, 천장, 가벽 등. 문은 넣지 않습니다.
-- 철거: 기존 마감재·설비 철거.
-- 마감/공과잡비: 보양, 입주 청소, 폐기물 처리, 승강기 사용료처럼 금액이 따로 적히는 항목. 이윤이나 보험료가 아닙니다.
+- 철거: 기존 마감재·설비 철거. 철거 폐기물 처리를 포함할 수 있습니다.
+- 마감/공과잡비: 보양, 입주 청소, 승강기 사용료, 철물·잡자재처럼 금액이 따로 적히는 항목. 이윤이나 보험료가 아닙니다.
 
 입력 필드
 - 시공범위 "전체"는 집 전체 리모델링, "부분"은 일부 공종만 하는 공사입니다.
@@ -96,7 +97,8 @@ def build_user_prompt(record: dict) -> str:
 
 
 def prompt_hash(user_prompt: str) -> str:
-    return hashlib.sha256((SYSTEM_PROMPT + "\n" + user_prompt).encode("utf-8")).hexdigest()[:16]
+    # 출력 토큰 한도도 넣는다 — 한도가 모자라 잘린 응답이 한도를 올린 뒤에도 다시 쓰이지 않게
+    return hashlib.sha256(f"{SYSTEM_PROMPT}\n{user_prompt}\n{MAX_OUTPUT_TOKENS}".encode()).hexdigest()[:16]
 
 
 # ── 응답 읽기 (순수 계산) ─────────────────────────────────────────────────
@@ -108,7 +110,7 @@ def _range(value) -> dict | None:
         return None
     try:
         lo, mid, hi = (int(value[k]) for k in ("최소", "중간", "최대"))
-    except (KeyError, TypeError, ValueError):
+    except (KeyError, TypeError, ValueError, OverflowError):  # OverflowError: 1e999처럼 무한대로 읽히는 값
         return None
     if not 0 < lo <= mid <= hi:
         return None
@@ -118,21 +120,26 @@ def _range(value) -> dict | None:
 def parse_response(text: str | None) -> dict:
     """LLM의 답을 엔진 출력과 같은 모양으로 바꾼다. 읽을 수 없으면 {"error": 사유}.
 
-    코드 블록 표시나 앞뒤 설명이 붙어도 첫 '{'부터 마지막 '}'까지를 읽는다 — 형식 실수로 금액 추정을 깎지 않는다.
+    코드 블록 표시나 앞뒤 설명, 다른 중괄호가 섞여 있어도 총액 범위가 든 첫 JSON 객체를 읽는다 — 형식 실수로
+    금액 추정을 깎지 않는다.
     공종 범위 하나가 잘못됐으면 그 공종만 미산출(None)로 두고, 총액 범위가 잘못됐으면 실패다.
     """
     if not text or not text.strip():
         return {"error": "빈 응답"}
-    match = re.search(r"\{.*\}", text, re.DOTALL)
-    if not match:
-        return {"error": "JSON 없음"}
-    try:
-        data = json.loads(match.group(0))
-    except json.JSONDecodeError:
-        return {"error": "JSON 해석 실패"}
-    total = _range(data.get("총_견적_범위")) if isinstance(data, dict) else None
+    decoder, data = json.JSONDecoder(), None
+    for match in re.finditer(r"\{", text):
+        try:
+            candidate, _ = decoder.raw_decode(text, match.start())
+        except json.JSONDecodeError:
+            continue
+        if isinstance(candidate, dict) and "총_견적_범위" in candidate:
+            data = candidate
+            break
+    if data is None:
+        return {"error": "총액 범위가 든 JSON 없음"}
+    total = _range(data.get("총_견적_범위"))
     if total is None:
-        return {"error": "총액 범위 없음 또는 잘못됨"}
+        return {"error": "총액 범위가 잘못됨"}
     trades = data.get("공종별_단가_범위")
     trades = trades if isinstance(trades, dict) else {}
     ranges = {g: r for g, v in trades.items() if (r := _range(v)) is not None}
@@ -196,8 +203,11 @@ def fetch(name: str, record: dict, rep: int, split: str) -> dict:
     digest = prompt_hash(user_prompt)
     path = LLM_RUNS_DIR / split / spec["model"] / f"{record['id']}_r{rep}.json"
     if path.exists():
-        saved = json.loads(path.read_text(encoding="utf-8"))
-        if saved["prompt_hash"] == digest:
+        try:
+            saved = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:  # 쓰다가 끊긴 파일 — 없는 것으로 보고 다시 부른다
+            saved = {}
+        if saved.get("prompt_hash") == digest:
             return {**saved, "cached": True}
     try:
         result = _CALLERS[spec["provider"]](spec["model"], user_prompt)
@@ -209,7 +219,9 @@ def fetch(name: str, record: dict, rep: int, split: str) -> dict:
         **result, "cost_usd": call_cost(result["usage"], spec["price"]),
     }
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(saved, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp = path.with_suffix(".tmp")  # 다 쓴 뒤에 이름을 바꾼다 — 쓰는 중에 끊겨도 반쯤 쓰인 응답 파일이 남지 않게
+    tmp.write_text(json.dumps(saved, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
     return {**saved, "cached": False}
 
 
@@ -224,7 +236,7 @@ def aggregate_reps(summaries: list[dict]) -> dict:
     for key in _KEYS:
         values = [s[key] for s in summaries if s.get(key) is not None]
         out[key] = {"평균": statistics.mean(values), "최소": min(values), "최대": max(values)} if values else None
-    for key in ("과대", "과소", "실패", "건수"):
+    for key in ("과대", "과소", "실패", "미산출", "건수"):
         out[key] = [s.get(key, 0) for s in summaries]
     return out
 
@@ -256,18 +268,11 @@ def print_model_report(name: str, per_rep: list[dict], calls: list[dict]) -> Non
     for g in per_rep[0]["공종별"]:
         agg = aggregate_reps([s["공종별"][g] for s in per_rep if g in s["공종별"]])
         print(f"  {g:<10} 절대오차율 {_fmt(agg['절대오차율_중앙값']):<16} 같은 폭 적중률 {_fmt(agg['같은폭_적중률']):<16} "
-              f"적중률 {_fmt(agg['적중률']):<16} 폭 {_fmt(agg['폭_중앙값']):<16} 과대 {agg['과대']}·과소 {agg['과소']}")
+              f"적중률 {_fmt(agg['적중률']):<16} 폭 {_fmt(agg['폭_중앙값']):<16} 과대 {agg['과대']}·과소 {agg['과소']} "
+              f"건수 {agg['건수']} 미산출 {agg['미산출']} 실패 {agg['실패']}")
 
 
 # ── 실행 ──────────────────────────────────────────────────────────────────
-
-
-def load_records(split: str) -> list[dict]:
-    records = [r for r in json.loads(GROUND_TRUTH_PATH.read_text(encoding="utf-8"))
-               if r["status"] == "verified" and r["split"] == split]
-    if not records:
-        raise SystemExit(f"검수 완료된 {split} 레코드가 없습니다")
-    return records
 
 
 def check_models(names: list[str]) -> None:
@@ -306,24 +311,27 @@ def run(split: str, names: list[str], repeats: int) -> None:
         jobs = [(record, rep) for record in records for rep in range(1, repeats + 1)]
         with concurrent.futures.ThreadPoolExecutor(max_workers=WORKERS) as pool:
             calls = list(pool.map(lambda job: fetch(name, job[0], job[1], split), jobs))
+        errors = [f"{c['id']} r{c['rep']}: {c['call_error']}" for c in calls if "call_error" in c]
+        if errors:
+            # 호출 오류(한도 초과, 네트워크, 잘못된 모델 ID)는 모델의 오답이 아니다. 채점하면 적중률이 깎여 보이므로
+            # 이 모델은 채점하지 않는다. 받은 응답은 저장돼 있어서 다시 실행하면 실패한 건만 다시 부른다
+            print(f"\n=== {name} ({MODELS[name]['model']}) — 호출 오류 {len(errors)}건, 채점하지 않음. 다시 실행하세요",
+                  *errors, sep="\n    ")
+            report["models"][name] = {"model": MODELS[name]["model"], "call_errors": errors}
+            continue
         by_key = {(c["id"], c["rep"]): c for c in calls}
 
         per_rep, rows_by_rep = [], {}
         for rep in range(1, repeats + 1):
             rows = []
             for record in records:
-                call = by_key[(record["id"], rep)]
-                output = {"error": call["call_error"]} if "call_error" in call else parse_response(call["text"])
-                rows.append(score_record(record, output))
+                rows.append(score_record(record, parse_response(by_key[(record["id"], rep)]["text"])))
             rows_by_rep[rep] = rows
             per_rep.append(summarize(rows))
         print_model_report(name, per_rep, calls)
-        errors = [f"{c['id']} r{c['rep']}: {c['call_error']}" for c in calls if "call_error" in c]
-        if errors:
-            print("  호출 오류(저장하지 않음 — 다시 실행하면 이 건만 다시 부른다):", *errors, sep="\n    ")
         report["models"][name] = {
             "model": MODELS[name]["model"], "summary_per_rep": per_rep, "rows_per_rep": rows_by_rep,
-            "cost_usd": sum(c["cost_usd"] for c in calls if "call_error" not in c), "call_errors": errors,
+            "cost_usd": sum(c["cost_usd"] for c in calls), "call_errors": [],
         }
 
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -346,9 +354,7 @@ def main() -> None:
     if args.check:
         check_models(args.models)
         return
-    # 평가용 세트의 결과를 보면서 프롬프트나 엔진을 고치면 세트를 나눈 의미가 없어진다
-    if args.split == "eval" and not args.final:
-        parser.error("평가용 세트는 마지막 비교 때만 실행합니다. 정말 실행하려면 --final")
+    require_final(parser, args)
     if args.repeats < 1:
         parser.error("--repeats는 1 이상")
     if args.dry_run:

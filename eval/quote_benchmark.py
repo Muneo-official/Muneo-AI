@@ -153,6 +153,8 @@ def summarize_scores(scores: list[dict | None], failed: int = 0) -> dict:
     scored = [s for s in scores if s is not None]
     summary = {"건수": len(scored), "미산출": len(scores) - len(scored), "실패": failed}
     if not scored:
+        if failed:  # 전부 실패한 묶음은 적중률 0%다. 값을 비워 두면 회차 평균에서 이 회차가 빠진다
+            summary.update({"적중률": 0.0, "같은폭_적중률": 0.0})
         return summary
     abs_err = [abs(s["오차율"]) for s in scored]
     hits = [1.0 if s["적중"] else 0.0 for s in scored] + [0.0] * failed
@@ -260,11 +262,23 @@ def print_report(rows: list[dict], summary: dict) -> None:
 # ── 실행 ──────────────────────────────────────────────────────────────────
 
 
-async def run(split: str) -> None:
+def load_records(split: str) -> list[dict]:
+    """채점할 정답 레코드. LLM 비교(eval/quote_llm_benchmark.py)도 이 함수를 쓴다 — 두 쪽이 다른 건을 채점하지 않게."""
     records = [r for r in json.loads(GROUND_TRUTH_PATH.read_text(encoding="utf-8"))
                if r["status"] == "verified" and r["split"] == split]
     if not records:
         raise SystemExit(f"검수 완료된 {split} 레코드가 없습니다")
+    return records
+
+
+def require_final(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    """평가용 세트 결과를 보면서 엔진이나 프롬프트를 고치면 세트를 나눈 의미가 없어진다. 실수로 돌리지 않게 막는다."""
+    if args.split == "eval" and not args.final:
+        parser.error("평가용 세트는 마지막 비교 때만 실행합니다. 정말 실행하려면 --final")
+
+
+async def run(split: str) -> None:
+    records = load_records(split)
 
     # app/core/deps.py의 lifespan과 같은 구성 — 서비스와 다른 설정으로 채점하면 의미가 없다.
     # lifespan에 엔진 인자나 설정이 추가되면 여기도 같이 고친다
@@ -326,9 +340,7 @@ def main() -> None:
     parser.add_argument("--split", choices=["dev", "eval"], default="dev")
     parser.add_argument("--final", action="store_true", help="평가용(eval) 세트 실행 확인 — 마지막 비교 때 한 번만")
     args = parser.parse_args()
-    # 평가용 세트 결과를 보면서 엔진을 고치면 세트를 나눈 의미가 없어진다. 실수로 돌리지 않게 막는다
-    if args.split == "eval" and not args.final:
-        parser.error("평가용 세트는 마지막 비교 때만 실행합니다. 정말 실행하려면 --final")
+    require_final(parser, args)
     sys.stdout.reconfigure(encoding="utf-8")  # 출력을 파일로 돌리면 Windows 기본 인코딩(cp949)이라 '—'에서 멈춘다
     asyncio.run(run(args.split))
 

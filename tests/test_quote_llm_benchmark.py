@@ -8,7 +8,7 @@ import json
 import pytest
 
 from eval import quote_llm_benchmark as llm
-from eval.quote_benchmark import score_record, summarize
+from eval.quote_benchmark import score_record, summarize, summarize_scores
 
 
 def _record(**truth) -> dict:
@@ -102,14 +102,24 @@ def test_회차별_요약을_평균과_최소_최대로_묶는다():
     assert agg["과대"] == [6, 7]
 
 
-def test_전부_실패한_회차는_지표에서_빠지고_실패_수는_남는다():
-    agg = llm.aggregate_reps([
-        {"건수": 0, "미산출": 0, "실패": 10},
-        {"건수": 10, "절대오차율_중앙값": 0.4, "적중률": 0.5, "폭_중앙값": 0.5, "과대": 7, "과소": 3, "실패": 0},
-    ])
+def test_전부_실패한_회차는_적중률_0으로_평균에_들어간다():
+    # 값을 비워 두면 그 회차가 평균에서 빠져, 두 번 중 한 번을 통째로 실패한 모델이 100%로 보인다
+    ok = score_record(_record(), llm.parse_response(_answer()))
+    agg = llm.aggregate_reps([summarize_scores([], failed=2), summarize_scores([ok["직접비"]] * 2)])
 
-    assert agg["절대오차율_중앙값"]["평균"] == 0.4
-    assert agg["실패"] == [10, 0]
+    assert agg["적중률"]["평균"] == 0.5 and agg["같은폭_적중률"]["평균"] == 0.5
+    assert agg["절대오차율_중앙값"]["평균"] == 0.0  # 오차율은 구할 수 없는 회차를 뺀다
+    assert agg["실패"] == [2, 0]
+
+
+def test_다른_중괄호가_섞여_있어도_총액이_든_JSON을_읽는다():
+    text = '형식 예시 {"a": 1} 답: ' + _answer() + " (범위는 {최소}~{최대})"
+
+    assert llm.parse_response(text)["총_견적_범위"]["중간"] == 5_000_000
+
+
+def test_무한대로_읽히는_금액은_멈추지_않고_실패로_처리한다():
+    assert "error" in llm.parse_response('{"총_견적_범위": {"최소": 1, "중간": 2, "최대": 1e999}}')
 
 
 # ── 프롬프트·비용 ──────────────────────────────────────────────────────────
@@ -171,6 +181,38 @@ def test_호출이_실패하면_저장하지_않고_실패로_돌려준다(tmp_p
 
     assert "rate limit" in result["call_error"]
     assert not list(tmp_path.rglob("*.json"))
+
+
+def test_쓰다가_끊긴_응답_파일은_없는_것으로_보고_다시_부른다(fake_api, tmp_path):
+    path = tmp_path / "dev" / llm.MODELS["gpt"]["model"] / "gt-t01_r1.json"
+    path.parent.mkdir(parents=True)
+    path.write_text('{"id": "gt-t01", "prom', encoding="utf-8")
+
+    assert not llm.fetch("gpt", _record(), 1, "dev")["cached"]
+    assert len(fake_api) == 1 and json.loads(path.read_text(encoding="utf-8"))["text"]
+
+
+def test_출력_토큰_한도를_바꾸면_저장된_응답을_다시_쓰지_않는다(fake_api, monkeypatch):
+    llm.fetch("gpt", _record(), 1, "dev")
+    monkeypatch.setattr(llm, "MAX_OUTPUT_TOKENS", llm.MAX_OUTPUT_TOKENS * 2)
+    llm.fetch("gpt", _record(), 1, "dev")
+
+    assert len(fake_api) == 2
+
+
+def test_호출_오류가_있는_모델은_채점하지_않는다(tmp_path, monkeypatch, capsys):
+    def broken(model, user_prompt):
+        raise RuntimeError("rate limit")
+
+    monkeypatch.setattr(llm, "LLM_RUNS_DIR", tmp_path)
+    monkeypatch.setattr(llm, "load_records", lambda split: [_record()])
+    monkeypatch.setenv("OPENAI_API_KEY", "x")
+    monkeypatch.setitem(llm._CALLERS, "openai", broken)
+    llm.run("dev", ["gpt"], 1)
+
+    report = json.loads(next(tmp_path.glob("dev_*.json")).read_text(encoding="utf-8"))
+    assert "summary_per_rep" not in report["models"]["gpt"] and report["models"]["gpt"]["call_errors"]
+    assert "채점하지 않음" in capsys.readouterr().out
 
 
 # ── 평가용 세트 잠금 ───────────────────────────────────────────────────────
