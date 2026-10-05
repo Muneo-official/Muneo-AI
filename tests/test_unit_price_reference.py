@@ -16,8 +16,8 @@ from app.domain.unit_price_reference import (
 )
 
 
-def _item(category: str, description: str, unit_price: int, quantity: int = 2) -> dict:
-    return {"category": category, "description": description, "unit_price": unit_price, "amount": unit_price * quantity}
+def _item(category: str, description: str, unit_price: int, quantity: int = 2, unit: str = "식") -> dict:
+    return {"category": category, "description": description, "unit_price": unit_price, "amount": unit_price * quantity, "unit": unit}
 
 
 def _case(i: int, items: list[dict], **more) -> dict:
@@ -36,7 +36,7 @@ def _cases(n: int = 20) -> list[dict]:
 def test_품명의_괄호_숫자_기호는_열쇠에서_뺀다():
     a = item_key({"category": "도배", "description": "실크벽지(LX 베스띠, 개나리 로하스)"})
     b = item_key({"category": "도배", "description": "실크 벽지 (LG,베스티) 2.5"})
-    assert a == b == ("도배", "실크벽지")
+    assert a == b == ("도배", "실크벽지", "")
 
 
 def test_설비와_욕실은_같은_묶음이다():
@@ -56,7 +56,7 @@ def test_단가가_없거나_금액보다_큰_줄은_비교하지_않는다():
 def test_서로_다른_의뢰가_충분한_품목만_기준이_된다():
     cases = _cases(MIN_REQUESTS) + [_case(100 + i, [_item("가구", "한샘 싱크대", 3_000_000, 1)]) for i in range(MIN_REQUESTS - 1)]
     table = build_reference(cases)
-    assert ("도배", "인건비") in table and ("가구", "한샘싱크대") not in table
+    assert ("도배", "인건비", "식") in table and ("가구", "한샘싱크대", "식") not in table
 
 
 def test_한_의뢰의_견적서_여러_장은_한_의뢰로_센다():
@@ -69,11 +69,11 @@ def test_비주거_견적서와_채점하는_의뢰는_기준에서_뺀다():
     cases = _cases(MIN_REQUESTS)
     assert build_reference(cases[:-1] + [{**cases[-1], "is_non_residential": True}]) == {}
     assert build_reference(cases, exclude_request="https://example.com/0") == {}
-    assert ("도배", "인건비") in build_reference(cases)
+    assert ("도배", "인건비", "식") in build_reference(cases)
 
 
 def test_기준은_단가의_하위_10퍼센트_중간_상위_10퍼센트다():
-    stats = build_reference(_cases(20))[("도배", "인건비")]
+    stats = build_reference(_cases(20))[("도배", "인건비", "식")]
     assert (stats["n"], stats["p10"], stats["median"], stats["p90"]) == (20, 250_000, 270_000, 300_000)
 
 
@@ -172,3 +172,57 @@ def test_지적의_공종_이름은_넘겨받은_함수로_정한다():
     assert [i.process for i in ref.issues(items)] == ["전기"]
     assert [i.process for i in ref.issues(items, process_of=lambda item: "전기/조명")] == ["전기/조명"]
     assert [i.title for i in ref.issues(items, process_of=lambda item: "전기/조명")] == ["전기/조명 단가가 시세보다 높음"]
+
+
+# ── 단위 ──────────────────────────────────────────────────────────────────
+
+
+def _mixed_unit_cases(n: int = 40) -> list[dict]:
+    # 도배 부자재: 절반은 "식"으로 25~35만 원, 절반은 "㎡"로 1,500~1,700원 (실제 코퍼스의 모습)
+    return [_case(i, [_item("도배", "부자재(풀, 부직포)", 200_000 + (i % 4) * 50_000, 1, "식") if i % 2
+                      else _item("도배", "부자재(풀, 부직포)", 1_500 + (i % 4) * 100, 100, "㎡")]) for i in range(n)]
+
+
+def test_같은_품목도_단위가_다르면_기준을_따로_만든다():
+    # 한데 묶으면 범위가 1,500~350,000원이 되어, ㎡당 5,000원(시세의 3배)이 정상으로 지나간다
+    table = build_reference(_mixed_unit_cases())
+    assert table[("도배", "부자재", "m2")]["p90"] == 1_700 and table[("도배", "부자재", "식")]["p10"] == 250_000
+    ref = UnitPriceReference(table)
+    assert ref.judge(_item("도배", "부자재", 5_000, 100, "m2"))[0] == "높음"
+    assert ref.judge(_item("도배", "부자재", 1_500, 100, "㎡"))[0] is None   # 묶었을 때는 "낮음"으로 걸렸다
+    assert ref.judge(_item("도배", "부자재", 250_000, 1, "식"))[0] is None
+
+
+def test_기준에_없는_단위의_줄은_비교하지_않는다():
+    ref = UnitPriceReference(build_reference(_mixed_unit_cases()))
+    assert ref.judge(_item("도배", "부자재", 4_000, 30, "평")) is None
+
+
+def test_단위가_없는_줄은_품목의_단위가_하나로_모일_때만_비교한다():
+    # 인건비는 모두 "식"이라 단위 칸이 없는 견적서의 인건비도 견줄 수 있다. 부자재는 식과 ㎡가 반반이라 견주지 않는다
+    assert _reference().judge(_item("도배", "인건비", 560_000, unit=""))[0] == "높음"
+    assert UnitPriceReference(build_reference(_mixed_unit_cases())).judge(_item("도배", "부자재", 5_000, 100, "")) is None
+
+
+def test_단위가_안_적힌_코퍼스의_줄은_기준에_넣지_않는다():
+    cases = [_case(i, [_item("도배", "인건비", 280_000, unit="")]) for i in range(20)]
+    assert build_reference(cases) == {}
+
+
+def test_사람_품을_세는_단위는_하나로_본다():
+    cases = [_case(i, [_item("도배", "인건비", 280_000, 5, ("M/D", "인", "명")[i % 3])]) for i in range(20)]
+    assert ("도배", "인건비", "인") in build_reference(cases)
+
+
+def test_구분_이름이_그대로_남은_공종은_같은_공종으로_모은다():
+    # 코퍼스에는 "도배공사", "조명공사", "목공사"처럼 견적서의 구분 이름이 그대로 남은 줄이 있다
+    assert item_key({"category": "도배공사", "description": "인건비"}) == item_key({"category": "도배", "description": "인건비"})
+    assert item_key({"category": "목공사", "description": "인건비"})[0] == "목공"
+    assert item_key({"category": "조명공사", "description": "매입등"})[0] == "전기"
+    assert item_key({"category": "수전공사", "description": "샤워 수전"}) == item_key({"category": "욕실", "description": "샤워 수전"})
+
+
+def test_범위가_너무_넓은_품목은_기준으로_쓰지_않는다():
+    # "창호 부자재 1식"은 8천 원부터 20만 원까지 있다. 이런 품목으로는 비싸다 싸다를 말할 수 없다
+    cases = [_case(i, [_item("창호", "부자재", (8_000, 75_000, 200_000)[i % 3], 1)]) for i in range(30)]
+    assert build_reference(cases) == {}

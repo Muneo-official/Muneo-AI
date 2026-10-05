@@ -9,7 +9,7 @@ class UnitPriceRepository:
     """`unit_price_reference` 컬렉션 접근 계층 — 리스크 진단이 품목의 단가와 수량을 견주는 기준표.
 
     문서 하나가 품목 하나다.
-      단가: {kind: "unit_price", category, name, n, p10, median, p90, built_at}
+      단가: {kind: "unit_price", category, name, unit, n, p10, median, p90, built_at} — unit ""는 단위가 안 적힌 줄의 기준
       수량: {kind: "quantity", category, name, unit, n, median, p90, built_at} — 평당 수량
     표는 scripts/build_unit_price_reference.py가 estimate_cases에서 통째로 다시 만들어 넣고, 서버는 시작할 때 한 번 읽는다.
     """
@@ -24,13 +24,14 @@ class UnitPriceRepository:
             if doc.get("kind") == "quantity":
                 quantities[(doc["category"], doc["name"], doc["unit"])] = {k: doc[k] for k in ("n", "median", "p90")}
             else:
-                prices[(doc["category"], doc["name"])] = {k: doc[k] for k in ("n", "p10", "median", "p90")}
+                prices[(doc["category"], doc["name"], doc["unit"])] = {k: doc[k] for k in ("n", "p10", "median", "p90")}
         return prices, quantities
 
     async def replace_all(self, prices: dict[Key, dict[str, int]], quantities: dict[QuantityKey, dict[str, float]]) -> int:
         """표를 통째로 바꾼다. 반환: 넣은 문서 수."""
         built_at = datetime.now(UTC)
-        docs = [{"kind": "unit_price", "category": c, "name": n, **stats, "built_at": built_at} for (c, n), stats in prices.items()]
+        docs = [{"kind": "unit_price", "category": c, "name": n, "unit": u, **stats, "built_at": built_at}
+                for (c, n, u), stats in prices.items()]
         docs += [{"kind": "quantity", "category": c, "name": n, "unit": u, **stats, "built_at": built_at}
                  for (c, n, u), stats in quantities.items()]
         await self._collection.delete_many({})

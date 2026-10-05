@@ -33,10 +33,11 @@ async def main(apply: bool) -> None:
     table = build_reference(cases)
     quantities = build_quantity_reference(cases)
     lines = sum(len((c.get("parsed_estimate") or {}).get("line_items") or []) for c in cases)
-    print(f"견적서 {len(cases)}건, 품목 {lines:,}줄 → 서로 다른 의뢰 {MIN_REQUESTS}건 이상에서 나온 품목 {len(table)}종 "
-          f"(해당 줄 {sum(s['n'] for s in table.values()):,}줄)")
-    for (category, name), s in sorted(table.items(), key=lambda kv: -kv[1]["n"])[:15]:
-        print(f"  {category} / {name}: {s['n']}줄, 하위 10% {s['p10']:,} · 중간 {s['median']:,} · 상위 10% {s['p90']:,}")
+    with_unit = {key: s for key, s in table.items() if key[2]}
+    print(f"견적서 {len(cases)}건, 품목 {lines:,}줄 → 서로 다른 의뢰 {MIN_REQUESTS}건 이상에서 나온 품목 {len(with_unit)}종 "
+          f"(해당 줄 {sum(s['n'] for s in with_unit.values()):,}줄), 단위가 안 적힌 줄에 쓸 기준 {len(table) - len(with_unit)}종")
+    for (category, name, unit), s in sorted(with_unit.items(), key=lambda kv: -kv[1]["n"])[:15]:
+        print(f"  {category} / {name} ({unit}): {s['n']}줄, 하위 10% {s['p10']:,} · 중간 {s['median']:,} · 상위 10% {s['p90']:,}")
     print(f"평당 수량을 비교할 수 있는 품목 {len(quantities)}종")
     for (category, name, unit), s in sorted(quantities.items(), key=lambda kv: -kv[1]["n"])[:10]:
         print(f"  {category} / {name} ({unit}): {s['n']}줄, 평당 중간 {s['median']:g} · 상위 10% {s['p90']:g}")
