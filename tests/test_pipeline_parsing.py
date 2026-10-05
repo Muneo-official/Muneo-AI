@@ -102,3 +102,51 @@ def test_merge_parsed_results_multi_image_tolerates_non_numeric_total_cost():
     unknown = _result("<UNKNOWN>", [_item("타일공사", "욕실타일", 500_000)])
     merged = merge_parsed_results([ok, unknown])
     assert merged["total_cost"] == 1_000_000
+
+
+# ── 청크 병합: 겹친 구간의 중복, 리스크 진단용 행 ─────────────────────────
+
+
+def _chunk(items: list[dict], total: int = 0) -> dict:
+    return {"is_estimate": True, "total_cost": total, "line_items": items}
+
+
+def test_겹친_구간의_같은_행이_청크마다_다른_공종으로_읽혀도_한_번만_남는다():
+    # 실제 사례: 싱크볼이 한 청크에서는 가구, 다른 청크에서는 설비로 읽혀 두 공종에 하나씩 남았다
+    from pipeline.parsing import merge_chunk_results
+
+    row = {"code": "1305", "description": "사각 싱크볼", "amount": 390_000, "unit_price": 390_000}
+    merged = merge_chunk_results([_chunk([{**row, "category": "가구"}]), _chunk([{**row, "category": "설비"}])])
+    assert [i["category"] for i in merged["line_items"]] == ["가구"]
+
+
+def test_수집에서는_금액_없는_행과_소계_행을_버리고_리스크_진단에서는_남긴다():
+    from pipeline.parsing import is_subtotal_row, merge_chunk_results
+
+    items = [
+        {"code": "100", "category": "철거", "description": "소계", "amount": 1_000_000, "unit_price": 0},
+        {"code": "101", "category": "철거", "description": "철거 인건비", "amount": 1_000_000, "unit_price": 250_000},
+        {"code": "102", "category": "철거", "description": "욕실 벽타일철거 (별도, 현장 협의)", "amount": 0, "unit_price": 0},
+        {"code": "", "category": "철거", "description": "합계", "amount": 1_000_000, "unit_price": 0},
+    ]
+    assert [i["description"] for i in merge_chunk_results([_chunk(items)])["line_items"]] == ["철거 인건비"]
+
+    risk = merge_chunk_results([_chunk(items)], for_risk=True)["line_items"]
+    assert [i["description"] for i in risk] == ["소계", "철거 인건비", "욕실 벽타일철거 (별도, 현장 협의)"]
+    assert [is_subtotal_row(i) for i in risk] == [True, False, False]
+
+
+def test_금액_없는_행이_겹친_구간에서_두_번_읽혀도_한_번만_남는다():
+    from pipeline.parsing import merge_chunk_results
+
+    row = {"code": "1516", "category": "공과잡비", "description": "승강기 이용료 별도", "amount": 0, "unit_price": 0}
+    assert len(merge_chunk_results([_chunk([row]), _chunk([dict(row)])], for_risk=True)["line_items"]) == 1
+
+
+def test_코드가_없는_행은_공종이_다르면_같은_금액이어도_합치지_않는다():
+    # 목공의 "인건비 300,000"과 타일의 "인건비 300,000"은 다른 줄이다. 합치면 뒤쪽 공종의 금액이 사라진다
+    from pipeline.parsing import merge_chunk_results
+
+    items = [{"category": "목공", "description": "인건비", "amount": 300_000, "unit_price": 300_000},
+             {"category": "타일", "description": "인건비", "amount": 300_000, "unit_price": 300_000}]
+    assert [i["category"] for i in merge_chunk_results([_chunk(items)])["line_items"]] == ["목공", "타일"]

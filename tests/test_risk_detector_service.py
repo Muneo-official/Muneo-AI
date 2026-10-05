@@ -1,6 +1,5 @@
 import asyncio
 import time
-from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -44,14 +43,6 @@ def _vision_returning(result: dict, **usage):
     return fake
 
 
-def _mock_engine() -> MagicMock:
-    engine = MagicMock()
-    engine.build_query.return_value = "30평 서울 아파트 리모델링"
-    # 가격 체크는 비교 사례 부족으로 스킵되게 - 이 테스트 파일은 룰 기반 배선만 검증
-    engine.retrieve_cases = AsyncMock(return_value=[])
-    return engine
-
-
 _ONE_ITEM_RESULT = {
     "is_estimate": True,
     "total_cost": 1_000_000,
@@ -71,7 +62,7 @@ def _no_real_vision_client(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_analyze_raises_on_unsupported_space_type():
-    service = RiskDetectorService(engine=_mock_engine())
+    service = RiskDetectorService()
     command = _command(space_type="상가")
 
     with pytest.raises(ValueError, match="지원하지 않는 공간유형"):
@@ -80,7 +71,7 @@ async def test_analyze_raises_on_unsupported_space_type():
 
 @pytest.mark.asyncio
 async def test_analyze_raises_when_no_images():
-    service = RiskDetectorService(engine=_mock_engine())
+    service = RiskDetectorService()
     command = _command(image_files=[])
 
     with pytest.raises(ValueError, match="최소 1개 이상"):
@@ -92,7 +83,7 @@ async def test_analyze_returns_extraction_failure_issue_when_no_line_items(monke
     monkeypatch.setattr(
         service_module, "acall_vision_api_with_usage", _vision_returning({"is_estimate": False})
     )
-    service = RiskDetectorService(engine=_mock_engine())
+    service = RiskDetectorService()
 
     result = await service.analyze(_command())
 
@@ -108,7 +99,7 @@ async def test_analyze_runs_rule_based_analysis_on_parsed_items(monkeypatch):
         "acall_vision_api_with_usage",
         _vision_returning(_ONE_ITEM_RESULT),
     )
-    service = RiskDetectorService(engine=_mock_engine())
+    service = RiskDetectorService()
 
     result = await service.analyze(_command())
 
@@ -125,7 +116,7 @@ async def test_analyze_dedupes_identical_items_across_multiple_images(monkeypatc
         "acall_vision_api_with_usage",
         _vision_returning(_ONE_ITEM_RESULT),
     )
-    service = RiskDetectorService(engine=_mock_engine())
+    service = RiskDetectorService()
     command = _command(image_files=[b"page-1", b"page-2"])
 
     result = await service.analyze(command)
@@ -146,7 +137,7 @@ async def test_analyze_logs_per_call_usage_and_request_timing(monkeypatch):
     monkeypatch.setattr(service_module, "prepare_chunks_from_bytes", lambda raw: [raw + b"-a", raw + b"-b"])
     events: list[tuple[str, dict]] = []
     monkeypatch.setattr(service_module, "log_event", lambda event, **fields: events.append((event, fields)))
-    service = RiskDetectorService(engine=_mock_engine())
+    service = RiskDetectorService()
 
     await service.analyze(_command(image_files=[b"page-1", b"page-2"]))
 
@@ -170,7 +161,7 @@ async def test_analyze_logs_timing_even_when_no_line_items(monkeypatch):
     )
     events: list[tuple[str, dict]] = []
     monkeypatch.setattr(service_module, "log_event", lambda event, **fields: events.append((event, fields)))
-    service = RiskDetectorService(engine=_mock_engine())
+    service = RiskDetectorService()
 
     await service.analyze(_command())
 
@@ -198,7 +189,7 @@ async def test_parse_images_calls_chunks_concurrently(monkeypatch):
         return _call_result({"is_estimate": True, "line_items": [_item(chunk.decode())]})
 
     monkeypatch.setattr(service_module, "acall_vision_api_with_usage", fake)
-    service = RiskDetectorService(engine=_mock_engine())
+    service = RiskDetectorService()
 
     started = time.perf_counter()
     items, calls, _ = await service._parse_images([b"p1", b"p2"])
@@ -220,7 +211,7 @@ async def test_parse_images_keeps_image_and_chunk_order_regardless_of_completion
         return _call_result({"is_estimate": True, "line_items": [_item(chunk.decode())]})
 
     monkeypatch.setattr(service_module, "acall_vision_api_with_usage", fake)
-    service = RiskDetectorService(engine=_mock_engine())
+    service = RiskDetectorService()
 
     items, _, _ = await service._parse_images([b"p1", b"p2"])
 
@@ -241,7 +232,7 @@ async def test_parse_images_respects_global_concurrency_limit(monkeypatch):
         return _call_result({"is_estimate": False})
 
     monkeypatch.setattr(service_module, "acall_vision_api_with_usage", fake)
-    service = RiskDetectorService(engine=_mock_engine(), vision_max_concurrency=2)
+    service = RiskDetectorService(vision_max_concurrency=2)
 
     # 동시 요청 2건 × 청크 5개 = 10개가 몰려도 서비스 전체에서 2개까지만
     await asyncio.gather(service._parse_images([b"x"]), service._parse_images([b"y"]))
@@ -265,7 +256,7 @@ async def test_parse_images_cancels_remaining_calls_when_one_fails(monkeypatch):
         return _call_result({"is_estimate": False})
 
     monkeypatch.setattr(service_module, "acall_vision_api_with_usage", fake)
-    service = RiskDetectorService(engine=_mock_engine())
+    service = RiskDetectorService()
 
     with pytest.raises(RuntimeError, match="vision failed"):  # 원래 예외 타입 그대로 (라우터가 500으로 변환)
         await service._parse_images([b"x"])
@@ -294,7 +285,7 @@ async def test_parse_images_caps_calls_per_request_so_one_request_cannot_take_al
 
     monkeypatch.setattr(service_module, "acall_vision_api_with_usage", fake)
     # 전역 4, 요청당 3 — 큰 요청(6청크)이 먼저 와도 슬롯 1개는 뒤 요청 몫으로 남는다
-    service = RiskDetectorService(engine=_mock_engine(), vision_max_concurrency=4, vision_max_concurrency_per_request=3)
+    service = RiskDetectorService(vision_max_concurrency=4, vision_max_concurrency_per_request=3)
 
     started = time.perf_counter()
     big = asyncio.create_task(service._parse_images([b"big"]))
@@ -327,7 +318,7 @@ async def test_retries_once_when_model_answers_without_tool(monkeypatch):
     monkeypatch.setattr(service_module, "acall_vision_api_with_usage", fake)
     events: list[tuple[str, dict]] = []
     monkeypatch.setattr(service_module, "log_event", lambda event, **fields: events.append((event, fields)))
-    service = RiskDetectorService(engine=_mock_engine())
+    service = RiskDetectorService()
 
     items, vision_calls, _ = await service._parse_images([b"x"])
 
@@ -348,7 +339,7 @@ async def test_does_not_retry_refusal_truncation_or_successful_calls(monkeypatch
             calls.append(chunk)
             return first
         monkeypatch.setattr(service_module, "acall_vision_api_with_usage", once)
-        service = RiskDetectorService(engine=_mock_engine())
+        service = RiskDetectorService()
 
         await service._parse_images([b"x"])
 
@@ -367,7 +358,7 @@ async def test_image_with_a_chunk_that_never_called_tool_is_not_cached(monkeypat
 
     monkeypatch.setattr(service_module, "acall_vision_api_with_usage", fake)
     cache = _FakeParseCache()
-    service = RiskDetectorService(engine=_mock_engine(), parse_cache=cache)
+    service = RiskDetectorService(parse_cache=cache)
 
     items, _, _ = await service._parse_images([b"x"])
 
@@ -384,7 +375,7 @@ async def test_image_is_cached_when_retry_recovers(monkeypatch):
 
     monkeypatch.setattr(service_module, "acall_vision_api_with_usage", fake)
     cache = _FakeParseCache()
-    service = RiskDetectorService(engine=_mock_engine(), parse_cache=cache)
+    service = RiskDetectorService(parse_cache=cache)
 
     await service._parse_images([b"x"])
 
@@ -426,7 +417,7 @@ def _counting_vision(result: dict, **usage):
 async def test_same_image_twice_calls_vision_once_and_returns_identical_result(monkeypatch):
     fake, calls = _counting_vision(_ONE_ITEM_RESULT)
     monkeypatch.setattr(service_module, "acall_vision_api_with_usage", fake)
-    service = RiskDetectorService(engine=_mock_engine(), parse_cache=_FakeParseCache())
+    service = RiskDetectorService(parse_cache=_FakeParseCache())
 
     first = await service.analyze(_command())
     second = await service.analyze(_command())
@@ -440,7 +431,7 @@ async def test_cache_hit_still_reruns_rules_with_new_form_input(monkeypatch):
     # 캐시는 파싱 결과만 — 층수가 바뀌면 고층 양중비 이슈는 새로 판정돼야 한다
     fake, calls = _counting_vision(_ONE_ITEM_RESULT)
     monkeypatch.setattr(service_module, "acall_vision_api_with_usage", fake)
-    service = RiskDetectorService(engine=_mock_engine(), parse_cache=_FakeParseCache())
+    service = RiskDetectorService(parse_cache=_FakeParseCache())
 
     low = await service.analyze(_command(floor=2))
     high = await service.analyze(_command(floor=15))
@@ -458,7 +449,7 @@ async def test_partial_hit_parses_only_uncached_images_and_keeps_upload_order(mo
         return _call_result({"is_estimate": True, "line_items": [_item(chunk.decode())]})
 
     monkeypatch.setattr(service_module, "acall_vision_api_with_usage", fake)
-    service = RiskDetectorService(engine=_mock_engine(), parse_cache=_FakeParseCache())
+    service = RiskDetectorService(parse_cache=_FakeParseCache())
     await service._parse_images([b"p2"])  # p2만 캐시에 올려둔다
     called.clear()
 
@@ -475,7 +466,7 @@ async def test_partial_hit_parses_only_uncached_images_and_keeps_upload_order(mo
 async def test_duplicate_image_in_one_request_is_parsed_once(monkeypatch):
     fake, calls = _counting_vision(_ONE_ITEM_RESULT)
     monkeypatch.setattr(service_module, "acall_vision_api_with_usage", fake)
-    service = RiskDetectorService(engine=_mock_engine(), parse_cache=_FakeParseCache())
+    service = RiskDetectorService(parse_cache=_FakeParseCache())
 
     items, _, _ = await service._parse_images([b"same", b"same"])
 
@@ -488,7 +479,7 @@ async def test_empty_parse_result_is_not_cached(monkeypatch):
     fake, calls = _counting_vision({"is_estimate": False})
     monkeypatch.setattr(service_module, "acall_vision_api_with_usage", fake)
     cache = _FakeParseCache()
-    service = RiskDetectorService(engine=_mock_engine(), parse_cache=cache)
+    service = RiskDetectorService(parse_cache=cache)
 
     await service.analyze(_command())
     await service.analyze(_command())
@@ -508,7 +499,7 @@ async def test_nothing_cached_when_vision_call_fails(monkeypatch):
 
     monkeypatch.setattr(service_module, "acall_vision_api_with_usage", fake)
     cache = _FakeParseCache()
-    service = RiskDetectorService(engine=_mock_engine(), parse_cache=cache)
+    service = RiskDetectorService(parse_cache=cache)
 
     with pytest.raises(RuntimeError):
         await service._parse_images([b"x"])
@@ -522,7 +513,7 @@ async def test_cache_failure_falls_back_to_vision(monkeypatch, fail_on):
     monkeypatch.setattr(service_module, "acall_vision_api_with_usage", fake)
     events: list[tuple[str, dict]] = []
     monkeypatch.setattr(service_module, "log_event", lambda event, **fields: events.append((event, fields)))
-    service = RiskDetectorService(engine=_mock_engine(), parse_cache=_FakeParseCache(fail_on=fail_on))
+    service = RiskDetectorService(parse_cache=_FakeParseCache(fail_on=fail_on))
 
     result = await service.analyze(_command())
 
@@ -536,7 +527,7 @@ async def test_cache_failure_falls_back_to_vision(monkeypatch, fail_on):
 async def test_parse_version_change_invalidates_cache(monkeypatch):
     fake, calls = _counting_vision(_ONE_ITEM_RESULT)
     monkeypatch.setattr(service_module, "acall_vision_api_with_usage", fake)
-    service = RiskDetectorService(engine=_mock_engine(), parse_cache=_FakeParseCache())
+    service = RiskDetectorService(parse_cache=_FakeParseCache())
 
     await service.analyze(_command())
     monkeypatch.setattr(service_module, "RISK_PARSE_VERSION", "schema-changed")
@@ -555,7 +546,7 @@ async def test_timing_log_reports_cache_hits_and_saved_tokens(monkeypatch):
     monkeypatch.setattr(service_module, "prepare_chunks_from_bytes", lambda raw: [raw + b"-a", raw + b"-b"])
     events: list[tuple[str, dict]] = []
     monkeypatch.setattr(service_module, "log_event", lambda event, **fields: events.append((event, fields)))
-    service = RiskDetectorService(engine=_mock_engine(), parse_cache=_FakeParseCache())
+    service = RiskDetectorService(parse_cache=_FakeParseCache())
 
     await service.analyze(_command())
     await service.analyze(_command())
@@ -577,10 +568,53 @@ async def test_hashes_are_logged_even_without_cache(monkeypatch):
     monkeypatch.setattr(service_module, "acall_vision_api_with_usage", _vision_returning(_ONE_ITEM_RESULT))
     events: list[tuple[str, dict]] = []
     monkeypatch.setattr(service_module, "log_event", lambda event, **fields: events.append((event, fields)))
-    service = RiskDetectorService(engine=_mock_engine())  # parse_cache=None
+    service = RiskDetectorService()  # parse_cache=None
 
     await service.analyze(_command(image_files=[b"a", b"b"]))
 
     [timing] = [f for e, f in events if e == "risk_analyze_timing"]
     assert len(timing["image_sha256"]) == 2
     assert timing["parse_cache_hits"] == 0
+
+
+# ── 여러 장을 합칠 때의 소계 행 ────────────────────────────────────────────
+
+
+class _TwoPageCache:
+    """이미지 두 장의 파싱 결과를 캐시에서 준다 — Vision을 부르지 않고 합치는 과정만 본다."""
+
+    def __init__(self, pages: list[list[dict]]):
+        self._pages = pages
+
+    async def get_many(self, keys):
+        from app.repositories.risk_parse_cache_repository import CachedParse
+        return {key: CachedParse(line_items=page, input_tokens=0, output_tokens=0) for key, page in zip(keys, self._pages)}
+
+    async def put(self, key, parsed):
+        pass
+
+
+async def test_앞_쪽과_겹쳐서_줄을_뺐으면_소계_검산을_하지_않는다():
+    # 1쪽과 2쪽에 같은 "양변기 300,000"이 있으면 2쪽 것이 빠진다. 그 상태로 2쪽의 소계를 검산하면 맞는 견적서에
+    # 계산 오류를 지적하게 된다
+    toilet = {"code": "", "category": "욕실", "description": "양변기", "amount": 300_000, "unit_price": 300_000}
+    page1 = [toilet, {"code": "", "category": "욕실", "description": "소계", "amount": 300_000, "unit_price": 0}]
+    page2 = [dict(toilet), {"code": "", "category": "욕실", "description": "세면기", "amount": 200_000, "unit_price": 200_000},
+             {"code": "", "category": "욕실", "description": "소계", "amount": 500_000, "unit_price": 0}]
+    service = RiskDetectorService(parse_cache=_TwoPageCache([page1, page2]))
+
+    items, _, _ = await service._parse_images([b"page-1", b"page-2"])
+
+    assert [i["description"] for i in items] == ["양변기", "세면기"]
+
+
+async def test_겹친_줄이_없으면_소계_행을_그대로_둔다():
+    page1 = [{"code": "101", "category": "도배", "description": "실크벽지", "amount": 900_000, "unit_price": 900_000},
+             {"code": "100", "category": "도배", "description": "소계", "amount": 900_000, "unit_price": 0}]
+    page2 = [{"code": "201", "category": "바닥", "description": "강마루", "amount": 3_000_000, "unit_price": 125_000},
+             {"code": "200", "category": "바닥", "description": "소계", "amount": 3_000_000, "unit_price": 0}]
+    service = RiskDetectorService(parse_cache=_TwoPageCache([page1, page2]))
+
+    items, _, _ = await service._parse_images([b"page-1", b"page-2"])
+
+    assert [i["description"] for i in items].count("소계") == 2

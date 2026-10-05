@@ -4,6 +4,7 @@ from typing import Any
 
 from app.domain.risk_constants import PROCESS_CATEGORY_MAP, PROCESS_DISPLAY_NAME
 from app.domain.risk_models import RiskIssue
+from pipeline.parsing import is_subtotal_row
 
 
 class ResponseFormatter:
@@ -32,6 +33,8 @@ class ResponseFormatter:
     def _build_process_groups(self, line_items: list[dict[str, Any]], issues: list[RiskIssue], requested_processes: list[str]) -> list[dict[str, Any]]:
         grouped_items = defaultdict(list)
         for item in line_items:
+            if is_subtotal_row(item) or not item.get("amount"):
+                continue  # 소계 행은 검산에만 쓰고, 금액이 없는 줄은 "정상 0원"이 아니라 지적으로만 보여 준다
             process = self._process_from_category(item.get("category", ""))
             if process:
                 grouped_items[process].append(item)

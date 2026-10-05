@@ -8,6 +8,7 @@ from app.core.config import get_settings
 from app.core.logging import log_event
 from app.domain.estimate_engine import EstimateEngine
 from app.domain.risk_detector_service import RiskDetectorService
+from app.domain.unit_price_reference import UnitPriceReference
 from app.repositories.case_repository import CaseRepository
 from app.repositories.coefficient_repository import CoefficientRepository
 from app.repositories.estimate_repository import EstimateRepository
@@ -15,6 +16,7 @@ from app.repositories.feedback_repository import FeedbackRepository
 from app.repositories.pending_estimate_repository import PendingEstimateRepository
 from app.repositories.risk_parse_cache_repository import RiskParseCacheRepository
 from app.repositories.risk_report_repository import RiskReportRepository
+from app.repositories.unit_price_repository import UnitPriceRepository
 
 
 @asynccontextmanager
@@ -71,8 +73,14 @@ async def lifespan(app: FastAPI):
         if settings.risk_parse_cache_enabled
         else None
     )
+    unit_price_table, quantity_table = await UnitPriceRepository(
+        collection=mongo_client[settings.mongo_db_name]["unit_price_reference"]
+    ).load()
+    if not unit_price_table:
+        # 표는 scripts/build_unit_price_reference.py가 만든다. 없으면 리스크 진단이 단가 지적 없이 돈다
+        log_event("unit_price_reference_empty", level="warning")
     app.state.risk_detector_service = RiskDetectorService(
-        engine=app.state.engine,
+        unit_prices=UnitPriceReference(unit_price_table, quantity_table) if unit_price_table else None,
         vision_max_concurrency=settings.risk_vision_max_concurrency,
         vision_max_concurrency_per_request=settings.risk_vision_max_concurrency_per_request,
         parse_cache=parse_cache,

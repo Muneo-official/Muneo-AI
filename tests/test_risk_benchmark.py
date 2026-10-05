@@ -31,10 +31,9 @@ def test_정상_품목은_지적이_아니다():
     assert [(f["trade"], f["kind"]) for f in rb.muneo_findings(report)] == [("도배", "중복")]
 
 
-def test_가격_지적은_불분명이_아니라_가격으로_세고_방향을_금액으로_정한다():
-    high = {"status": "불분명", "title": "가구 항목 가격이 시세 범위를 벗어남",
-            "description": "견적 금액 9,000,000원이 유사 사례 시세 범위(2,000,000~6,000,000원, 중간값 4,000,000원)를 벗어납니다."}
-    low = {**high, "description": "견적 금액 1,000,000원이 유사 사례 시세 범위(2,000,000~6,000,000원, 중간값 4,000,000원)를 벗어납니다."}
+def test_가격_지적은_불분명이_아니라_가격으로_세고_방향은_제목에서_읽는다():
+    high = {"status": "불분명", "title": "가구 단가가 시세보다 높음", "description": "단가를 비교한 4개 품목 중 3개가 …"}
+    low = {"status": "불분명", "title": "욕실 단가가 시세보다 낮음", "description": "단가를 비교한 6개 품목 중 4개가 …"}
     got = rb.muneo_findings(_report(("가구", [high]), ("욕실", [low])))
     assert [(f["kind"], f["direction"]) for f in got] == [("가격", "과다"), ("가격", "과소")]
 

@@ -95,7 +95,9 @@ ESTIMATE_TOOL = {
 #
 # 섹션 전체 일반 규칙("항목은 속한 섹션 공종으로")은 쓰지 않는다 — 공종 설명의 "작업 내용 기준"·"폐기물처리→공과잡비"와
 # 충돌하고, 정답 파일에 없는 보양·폐기물 항목까지 옮긴다.
-RISK_DROPPED_ITEM_FIELDS = ("unit", "quantity")
+# unit은 다시 받는다(2026-10): 수량이 평인지 ㎡인지는 금액 ÷ 단가로 알 수 없어, 수량 과다 판정에 단위가 필요하다.
+# quantity는 계속 뺀다 — 금액 ÷ 단가로 계산된다.
+RISK_DROPPED_ITEM_FIELDS = ("quantity",)
 RISK_FILM_CATEGORY_RULE = "필름·시트지 시공은 붙이는 대상(샷시·문·문틀·붙박이장 등)과 관계없이 '필름'으로 분류한다."
 RISK_FAUCET_CATEGORY_RULE = (
     "견적서에 '수전공사' 또는 '수전/위생공사' 구분(섹션)이 있으면, 그 섹션에 속한 항목은 수전뿐 아니라 "
@@ -166,3 +168,30 @@ unit_price와 amount를 교환한다.
 검토해 누락된 행을 찾는다. 재검토 후에도 차이가 나면 이미지에 명시된 합계 값을 그대로
 total_cost로 쓴다(sum으로 덮어쓰지 않는다).
 """
+
+
+# 리스크 진단(실시간) 전용 지시문. 수집용과 다른 점은 "집계 행" 단락 하나다:
+#   - 소계 행을 품목과 함께 받는다 — 소계가 품목의 합과 맞는지 검산하려면 견적서에 적힌 소계가 필요하다
+#   - 금액이 없는 행("별도", "협의")을 받는다 — 총액에 들어가지 않은 비용이라 소비자에게 가장 위험한 줄인데,
+#     수집용 지시문은 금액이 있는 품목만 받아서 리스크 진단이 이 줄을 볼 수 없었다
+# 수집용(TOOL_USE_INSTRUCTIONS)은 그대로 둔다. 코퍼스의 품목에 소계 행이 섞이면 공종 금액이 두 번 더해진다.
+_AGGREGATE_BLOCK = TOOL_USE_INSTRUCTIONS[TOOL_USE_INSTRUCTIONS.index("━━━ 집계 행은 반드시 제외 ━━━"):
+                                         TOOL_USE_INSTRUCTIONS.index("━━━ amount와 unit_price 구분 ━━━")]
+RISK_TOOL_USE_INSTRUCTIONS = TOOL_USE_INSTRUCTIONS.replace(_AGGREGATE_BLOCK, """━━━ 소계 행과 금액이 없는 행 ━━━
+
+소계 행은 line_items에 포함한다. 품목과 구분되도록 이렇게 적는다:
+  - description은 정확히 "소계"
+  - category는 그 소계가 속한 공사 구분의 공종
+  - amount는 견적서에 적힌 소계 금액 그대로(품목을 더해서 고치지 않는다), unit_price는 0
+  - 소계 행은 견적서에 나온 자리(그 구분의 품목들 앞 또는 뒤)에 그대로 둔다
+
+금액 칸이 비어 있거나 "-", "별도", "협의"로 적힌 행도 품명이 있으면 포함한다. amount와 unit_price는 0으로 적고,
+"별도"·"협의" 같은 글자는 description에 그대로 남긴다.
+
+아래 행들은 포함하지 않는다:
+  - 견적서 전체의 "합계", "총계", "공사비", "공사비합계", 이윤·보험료·부가세 행
+  - 품명 칸이 비어 있고 금액만 있는 행
+  - 소제목 행("1) 목공마감재"처럼 금액도 수량도 없는 구분 제목)
+
+""").replace(
+    "기록 전 sum(line_items[*].amount)와 total_cost의 차이가", "기록 전 소계 행을 뺀 sum(line_items[*].amount)와 total_cost의 차이가")

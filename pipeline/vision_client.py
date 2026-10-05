@@ -26,7 +26,13 @@ from pipeline.image_prep import (
     prepare_chunks,
 )
 from pipeline.parsing import merge_chunk_results
-from pipeline.tool_schema import ESTIMATE_TOOL, RISK_ESTIMATE_TOOL, TOOL_NAME, TOOL_USE_INSTRUCTIONS
+from pipeline.tool_schema import (
+    ESTIMATE_TOOL,
+    RISK_ESTIMATE_TOOL,
+    RISK_TOOL_USE_INSTRUCTIONS,
+    TOOL_NAME,
+    TOOL_USE_INSTRUCTIONS,
+)
 
 MODEL = "claude-sonnet-4-6"
 MAX_TOKENS = 8192
@@ -83,12 +89,12 @@ def build_api_params(image_bytes: bytes) -> dict:
 
 
 def build_risk_api_params(image_bytes: bytes, model: str | None = None) -> dict:
-    """리스크 진단(실시간) 전용 — 출력 스키마만 RISK_ESTIMATE_TOOL(unit·quantity 제외, code 필수, 필름 분류 규칙)로 바꾸고 나머지는 같다.
+    """리스크 진단(실시간) 전용 — 출력 스키마는 RISK_ESTIMATE_TOOL(quantity 제외, code 필수, 필름 분류 규칙), 지시문은 RISK_TOOL_USE_INSTRUCTIONS(소계 행·금액 없는 행 포함)를 쓴다.
 
     model을 안 주면 RISK_MODEL(호출 시점의 모듈 값)을 쓴다 — 벤치 서버가 --model로 바꿔 모델을 비교한다.
     """
     model = model or RISK_MODEL
-    params = _build_image_params(image_bytes, RISK_ESTIMATE_TOOL, model)
+    params = _build_image_params(image_bytes, RISK_ESTIMATE_TOOL, model, RISK_TOOL_USE_INSTRUCTIONS)
     if model in _NO_FORCED_TOOL_MODELS:
         # 이 모델들은 강제 도구 호출(tool_choice: tool)이 400이다. 지시문이 이미 "record_estimate 도구를 호출해"라고
         # 명시하므로 auto로 두고, 도구를 안 부른 호출은 VisionCallResult.tool_called로 드러낸다.
@@ -121,17 +127,17 @@ def _risk_parse_version() -> str:
     request.pop("messages")  # 이미지 데이터 — 지시문은 instructions로 따로 넣는다
     spec = {
         "request": request,  # model·max_tokens·tools·tool_choice·thinking·extra_headers·extra_body
-        "instructions": TOOL_USE_INSTRUCTIONS,
+        "instructions": RISK_TOOL_USE_INSTRUCTIONS,
         "chunking": [MAX_PARSE_WIDTH, SPLIT_HEIGHT_THRESHOLD, CHUNK_HEIGHT, CHUNK_OVERLAP],
         "logic_revision": _PARSE_LOGIC_REVISION,
     }
     return hashlib.sha256(json.dumps(spec, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()[:16]
 
 
-_PARSE_LOGIC_REVISION = 1
+_PARSE_LOGIC_REVISION = 2  # 2: 청크 중복 열쇠에서 공종을 뺌, 소계 행과 금액 없는 행을 남김
 
 
-def _build_image_params(image_bytes: bytes, tool: dict, model: str = MODEL) -> dict:
+def _build_image_params(image_bytes: bytes, tool: dict, model: str = MODEL, instructions: str = TOOL_USE_INSTRUCTIONS) -> dict:
     return {
         "model": model,
         "max_tokens": MAX_TOKENS,
@@ -148,7 +154,7 @@ def _build_image_params(image_bytes: bytes, tool: dict, model: str = MODEL) -> d
                         "data": base64.standard_b64encode(image_bytes).decode("utf-8"),
                     },
                 },
-                {"type": "text", "text": TOOL_USE_INSTRUCTIONS},
+                {"type": "text", "text": instructions},
             ],
         }],
     }
