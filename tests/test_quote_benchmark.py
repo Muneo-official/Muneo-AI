@@ -74,9 +74,9 @@ def test_score_record_엔진_오류는_실패로_남고_정답의_공종을_기�
 
 def test_summarize_scores_미산출은_건수만_세고_지표에서_뺀다():
     scores = [
-        {"오차율": 0.10, "적중": True, "폭": 0.4},
-        {"오차율": -0.30, "적중": False, "폭": 0.6},
-        {"오차율": -0.20, "적중": True, "폭": 0.5},
+        {"오차율": 0.10, "적중": True, "같은폭_적중": True, "폭": 0.4},
+        {"오차율": -0.30, "적중": False, "같은폭_적중": False, "폭": 0.6},
+        {"오차율": -0.20, "적중": True, "같은폭_적중": False, "폭": 0.5},  # 넓게 불러서 맞춘 건
         None,
     ]
     s = summarize_scores(scores)
@@ -88,8 +88,10 @@ def test_summarize_scores_미산출은_건수만_세고_지표에서_뺀다():
 
 
 def test_summarize_scores_실패는_적중률에서_벗어남으로_센다():
-    scores = [{"오차율": 0.10, "적중": True, "폭": 0.4}, {"오차율": -0.05, "적중": True, "폭": 0.4}]
+    scores = [{"오차율": 0.10, "적중": True, "같은폭_적중": True, "폭": 0.4},
+              {"오차율": -0.05, "적중": True, "같은폭_적중": True, "폭": 0.4}]
     s = summarize_scores(scores, failed=2)
+    assert s["같은폭_적중률"] == pytest.approx(0.5)
     assert s["적중률"] == pytest.approx(0.5)  # 4건 중 2건 — 실패를 빼면 100%로 보인다
     assert s["절대오차율_중앙값"] == pytest.approx(0.075)  # 오차율은 견적이 나온 건으로만
     assert (s["건수"], s["실패"]) == (2, 2)
@@ -229,3 +231,16 @@ async def test_leave_out_다음_레코드로_넘어가면_이전_제외는_풀�
     await repo.leave_out("u/9", "2")
     await repo.leave_out("u/5", "5")
     assert repo.left_out_ids == {"5"}
+
+
+def test_score_range_같은_폭_적중은_부른_범위가_아니라_중간값_기준이다():
+    # 폭 27% — 중간값에서 위아래 13.5%. 부른 범위가 아무리 넓어도 이 안에 들어야 적중이다
+    wide = {"최소": 1_000_000, "중간": 10_000_000, "최대": 30_000_000}
+    assert score_range(wide, 11_300_000)["같은폭_적중"]
+    assert not score_range(wide, 11_400_000)["같은폭_적중"]
+    assert score_range(wide, 8_700_000)["같은폭_적중"]
+    assert not score_range(wide, 8_600_000)["같은폭_적중"]
+    # 좁게 불러서 놓친 건도 같은 잣대로는 맞을 수 있다
+    narrow = {"최소": 9_900_000, "중간": 10_000_000, "최대": 10_100_000}
+    s = score_range(narrow, 11_000_000)
+    assert not s["적중"] and s["같은폭_적중"]

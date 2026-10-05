@@ -12,6 +12,8 @@ eval/quote_benchmark.py — 가견적 채점: 정답셋의 입력으로 엔진�
 보는 값
   - 총액 오차율: (엔진 중간값 − 정답) / 정답. 절대값의 중앙값과 과대·과소 건수
   - 범위 적중률: 정답이 [최소, 최대] 안에 든 비율. 범위를 넓게 부르면 올라가므로 폭((최대−최소)/중간)과 함께 본다
+  - 같은 폭 적중률: 부른 범위 대신 중간값 ±13.5%(폭 27%) 안에 정답이 든 비율. 범위를 넓게 부르는 쪽과
+    좁게 부르는 쪽을 같은 잣대로 비교한다(eval/quote_llm_benchmark.py의 LLM 비교)
   - 주 지표는 공사비(직접비) 기준이다 — 가견적은 견적서의 공사비만 대상으로 하고 이윤·보험료·부가세는 뺀다.
     간접비 포함 기준은 참고로 함께 낸다(코퍼스의 total_cost에 간접비 포함 여부가 섞여 있다)
   - 전체 시공과 부분 시공은 총액 산출 경로가 달라 나눠서 보고, 플래그가 붙은 건을 뺀 값도 함께 낸다
@@ -43,6 +45,8 @@ from eval.quote_ground_truth import GROUND_TRUTH_PATH, REVIEW_DIR, 공종_순서
 load_dotenv()
 
 TARGET_HIT_RATE = 0.80
+# 같은 폭 적중률의 폭 — 엔진이 참고 사례를 12건 이상 모았을 때 부르는 총액 범위의 폭. 중간값에서 위아래로 절반씩
+COMMON_WIDTH = 0.27
 RUNS_DIR = REVIEW_DIR / "benchmark_runs"
 BOOTSTRAP_N = 2000
 BOOTSTRAP_SEED = 68
@@ -102,6 +106,7 @@ def score_range(rng: dict | None, truth: int) -> dict | None:
     return {
         "오차율": (mid - truth) / truth,
         "적중": lo <= truth <= hi,
+        "같은폭_적중": mid * (1 - COMMON_WIDTH / 2) <= truth <= mid * (1 + COMMON_WIDTH / 2),
         "폭": (hi - lo) / mid if mid > 0 else None,
     }
 
@@ -151,6 +156,7 @@ def summarize_scores(scores: list[dict | None], failed: int = 0) -> dict:
         return summary
     abs_err = [abs(s["오차율"]) for s in scored]
     hits = [1.0 if s["적중"] else 0.0 for s in scored] + [0.0] * failed
+    common_hits = [1.0 if s["같은폭_적중"] else 0.0 for s in scored] + [0.0] * failed
     widths = [s["폭"] for s in scored if s["폭"] is not None]
     summary.update({
         "절대오차율_중앙값": statistics.median(abs_err),
@@ -159,6 +165,8 @@ def summarize_scores(scores: list[dict | None], failed: int = 0) -> dict:
         "과소": sum(1 for s in scored if s["오차율"] < 0),
         "적중률": statistics.mean(hits),
         "적중률_구간": bootstrap_ci(hits, statistics.mean),
+        "같은폭_적중률": statistics.mean(common_hits),
+        "같은폭_적중률_구간": bootstrap_ci(common_hits, statistics.mean),
         "폭_중앙값": statistics.median(widths) if widths else None,
     })
     return summary
@@ -215,7 +223,7 @@ def _summary_line(name: str, s: dict) -> str:
         return f"  {name:<10} 채점 0건, 미산출 {s['미산출']}건, 실패 {s['실패']}건"
     line = (f"  {name:<10} n={s['건수']:<3} 절대오차율 {_pct(s['절대오차율_중앙값'])} {_ci(s['절대오차율_구간'])}  "
             f"과대 {s['과대']}·과소 {s['과소']}  적중률 {_pct(s['적중률'])} {_ci(s['적중률_구간'])}  "
-            f"폭 {_pct(s['폭_중앙값'])}")
+            f"폭 {_pct(s['폭_중앙값'])}  같은 폭(±{COMMON_WIDTH / 2:.1%}) 적중률 {_pct(s['같은폭_적중률'])}")
     line += f"  미산출 {s['미산출']}" if s["미산출"] else ""
     return line + (f"  실패 {s['실패']}(벗어남으로 셈)" if s["실패"] else "")
 
