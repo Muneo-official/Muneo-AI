@@ -143,8 +143,8 @@ def test_비용은_입력과_출력_토큰에_가격을_곱한다():
 def fake_api(tmp_path, monkeypatch):
     calls = []
 
-    def caller(model, user_prompt):
-        calls.append(model)
+    def caller(model, user_prompt, system):
+        calls.append(system)
         return {"text": _answer(), "stop": "end", "usage": {"input": 1000, "output": 2000}}
 
     monkeypatch.setattr(llm, "LLM_RUNS_DIR", tmp_path)
@@ -171,8 +171,19 @@ def test_회차가_다르거나_프롬프트가_바뀌면_다시_부른다(fake_
     assert len(fake_api) == 3
 
 
+def test_프롬프트_조건이_다르면_따로_부르고_따로_저장한다(fake_api, tmp_path):
+    llm.fetch("gpt", _record(), 1, "dev")
+    llm.fetch("gpt", _record(), 1, "dev", "narrow")
+    again = llm.fetch("gpt", _record(), 1, "dev")
+
+    assert len(fake_api) == 2 and again["cached"]  # 좁은 조건의 응답이 본 조건의 응답을 덮어쓰지 않는다
+    assert "0.27" in fake_api[1] and "0.27" not in fake_api[0]
+    assert fake_api[1].startswith(fake_api[0])  # 본 프롬프트에 지시만 덧붙인다
+    assert len(list(tmp_path.rglob("gt-t01_r1.json"))) == 2
+
+
 def test_호출이_실패하면_저장하지_않고_실패로_돌려준다(tmp_path, monkeypatch):
-    def broken(model, user_prompt):
+    def broken(model, user_prompt, system):
         raise RuntimeError("rate limit")
 
     monkeypatch.setattr(llm, "LLM_RUNS_DIR", tmp_path)
@@ -201,7 +212,7 @@ def test_출력_토큰_한도를_바꾸면_저장된_응답을_다시_쓰지_않
 
 
 def test_호출_오류가_있는_모델은_채점하지_않는다(tmp_path, monkeypatch, capsys):
-    def broken(model, user_prompt):
+    def broken(model, user_prompt, system):
         raise RuntimeError("rate limit")
 
     monkeypatch.setattr(llm, "LLM_RUNS_DIR", tmp_path)

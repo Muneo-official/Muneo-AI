@@ -5,6 +5,7 @@ eval/quote_llm_benchmark.py — 가견적 비교: 정답셋의 같은 입력을 
     python -m eval.quote_llm_benchmark --dry-run               # 프롬프트만 출력 (과금 없음)
     python -m eval.quote_llm_benchmark                         # 개선용(dev) 세트, 모델당 1회
     python -m eval.quote_llm_benchmark --split eval --final --repeats 3   # 평가용 세트 — 마지막 비교 때 한 번만
+    python -m eval.quote_llm_benchmark --variant narrow        # 범위를 엔진만큼 좁게 부르게 한 조건
 
 비교 조건
   - 입력: 엔진이 받는 값과 같다(EstimateRequest를 거친 JSON). 견적서 원문이나 정답 금액은 주지 않는다
@@ -87,6 +88,23 @@ SYSTEM_PROMPT = """당신은 한국의 주거 인테리어 공사 견적 전문�
 - "중간"은 가장 가능성이 높은 금액이고, "최소"~"최대"는 실제 견적이 들어올 것으로 보는 범위입니다.
 - "총_견적_범위"는 요청한 공종 전체의 공사비입니다."""
 
+# 프롬프트 조건. "base"가 본 비교의 프롬프트이고, 나머지는 거기에 지시를 덧붙인 것이다.
+# narrow: LLM은 넓게 부른다(총액 폭 48~70%, 엔진 27%). 엔진과 같은 폭으로 부르게 해도 정확도가 유지되는지 본다.
+# 총액은 엔진이 참고 사례를 12건 이상 모았을 때의 폭, 공종은 엔진의 상한(최대가 최소의 1.8배)과 같다
+PROMPT_VARIANTS: dict[str, str] = {
+    "base": "",
+    "narrow": """
+
+범위의 폭
+- "총_견적_범위"는 좁게 부릅니다. (최대 − 최소) ÷ 중간이 0.27을 넘지 않게 합니다.
+- "공종별_단가_범위"는 최대가 최소의 1.8배를 넘지 않게 합니다.""",
+}
+
+
+def system_prompt(variant: str = "base") -> str:
+    return SYSTEM_PROMPT + PROMPT_VARIANTS[variant]
+
+
 USER_PROMPT = "아래 조건의 인테리어 공사 견적을 추정해 주세요.\n\n{input_json}"
 
 
@@ -96,9 +114,9 @@ def build_user_prompt(record: dict) -> str:
     return USER_PROMPT.format(input_json=json.dumps(inp, ensure_ascii=False, indent=2))
 
 
-def prompt_hash(user_prompt: str) -> str:
+def prompt_hash(user_prompt: str, variant: str = "base") -> str:
     # 출력 토큰 한도도 넣는다 — 한도가 모자라 잘린 응답이 한도를 올린 뒤에도 다시 쓰이지 않게
-    return hashlib.sha256(f"{SYSTEM_PROMPT}\n{user_prompt}\n{MAX_OUTPUT_TOKENS}".encode()).hexdigest()[:16]
+    return hashlib.sha256(f"{system_prompt(variant)}\n{user_prompt}\n{MAX_OUTPUT_TOKENS}".encode()).hexdigest()[:16]
 
 
 # ── 응답 읽기 (순수 계산) ─────────────────────────────────────────────────
@@ -154,24 +172,24 @@ def call_cost(usage: dict, price: tuple[float, float]) -> float:
 # 반환: {"text": 답(없으면 None), "usage": {"input", "output"}, "stop": 종료 사유}. output에는 추론 토큰을 포함한다(과금 기준)
 
 
-def _call_openai(model: str, user_prompt: str) -> dict:
+def _call_openai(model: str, user_prompt: str, system: str) -> dict:
     from openai import OpenAI
 
     resp = OpenAI().responses.create(
-        model=model, instructions=SYSTEM_PROMPT, input=user_prompt, max_output_tokens=MAX_OUTPUT_TOKENS,
+        model=model, instructions=system, input=user_prompt, max_output_tokens=MAX_OUTPUT_TOKENS,
     )
     return {"text": resp.output_text, "stop": resp.status,
             "usage": {"input": resp.usage.input_tokens, "output": resp.usage.output_tokens}}
 
 
-def _call_gemini(model: str, user_prompt: str) -> dict:
+def _call_gemini(model: str, user_prompt: str, system: str) -> dict:
     from google import genai
     from google.genai import types
 
     client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
     resp = client.models.generate_content(
         model=model, contents=user_prompt,
-        config=types.GenerateContentConfig(system_instruction=SYSTEM_PROMPT, max_output_tokens=MAX_OUTPUT_TOKENS),
+        config=types.GenerateContentConfig(system_instruction=system, max_output_tokens=MAX_OUTPUT_TOKENS),
     )
     meta = resp.usage_metadata
     stop = resp.candidates[0].finish_reason if resp.candidates else None
@@ -180,12 +198,12 @@ def _call_gemini(model: str, user_prompt: str) -> dict:
                       "output": (meta.candidates_token_count or 0) + (meta.thoughts_token_count or 0)}}
 
 
-def _call_anthropic(model: str, user_prompt: str) -> dict:
+def _call_anthropic(model: str, user_prompt: str, system: str) -> dict:
     from pipeline.vision_client import get_client  # 서비스와 같은 클라이언트 — workspace 헤더를 같은 방식으로 붙인다
 
     # 거절 시 다른 모델로 넘기는 fallbacks는 쓰지 않는다 — 다른 모델의 답이 이 모델의 점수에 섞인다. 거절은 실패로 센다
     resp = get_client().messages.create(
-        model=model, max_tokens=MAX_OUTPUT_TOKENS, system=SYSTEM_PROMPT,
+        model=model, max_tokens=MAX_OUTPUT_TOKENS, system=system,
         messages=[{"role": "user", "content": user_prompt}],
     )
     text = "".join(block.text for block in resp.content if block.type == "text")
@@ -196,12 +214,14 @@ def _call_anthropic(model: str, user_prompt: str) -> dict:
 _CALLERS = {"openai": _call_openai, "gemini": _call_gemini, "anthropic": _call_anthropic}
 
 
-def fetch(name: str, record: dict, rep: int, split: str) -> dict:
+def fetch(name: str, record: dict, rep: int, split: str, variant: str = "base") -> dict:
     """모델 하나·정답 레코드 하나·회차 하나의 응답. 저장된 것이 있으면 그것을 쓰고, 없으면 부르고 저장한다."""
     spec = MODELS[name]
     user_prompt = build_user_prompt(record)
-    digest = prompt_hash(user_prompt)
-    path = LLM_RUNS_DIR / split / spec["model"] / f"{record['id']}_r{rep}.json"
+    digest = prompt_hash(user_prompt, variant)
+    # 조건마다 폴더를 나눈다 — 같은 자리에 두면 다른 조건의 응답을 덮어쓴다
+    folder = LLM_RUNS_DIR / split if variant == "base" else LLM_RUNS_DIR / split / f"variant_{variant}"
+    path = folder / spec["model"] / f"{record['id']}_r{rep}.json"
     if path.exists():
         try:
             saved = json.loads(path.read_text(encoding="utf-8"))
@@ -210,11 +230,11 @@ def fetch(name: str, record: dict, rep: int, split: str) -> dict:
         if saved.get("prompt_hash") == digest:
             return {**saved, "cached": True}
     try:
-        result = _CALLERS[spec["provider"]](spec["model"], user_prompt)
+        result = _CALLERS[spec["provider"]](spec["model"], user_prompt, system_prompt(variant))
     except Exception as exc:  # 회사마다 예외 종류가 다르다. 한 건의 실패로 전체를 멈추지 않고, 저장하지 않아 다음 실행에서 다시 부른다
         return {"id": record["id"], "rep": rep, "model": spec["model"], "call_error": f"{type(exc).__name__}: {exc}"}
     saved = {
-        "id": record["id"], "rep": rep, "model": spec["model"], "prompt_hash": digest,
+        "id": record["id"], "rep": rep, "model": spec["model"], "variant": variant, "prompt_hash": digest,
         "called_at": datetime.datetime.now().isoformat(timespec="seconds"),
         **result, "cost_usd": call_cost(result["usage"], spec["price"]),
     }
@@ -300,17 +320,18 @@ def check_models(names: list[str]) -> None:
         print(f"{name}: {spec['model']} {found}. 목록: {sorted(ids)}")
 
 
-def run(split: str, names: list[str], repeats: int) -> None:
+def run(split: str, names: list[str], repeats: int, variant: str = "base") -> None:
     records = load_records(split)
     missing = [MODELS[n]["key"] for n in names if not os.environ.get(MODELS[n]["key"])]
     if missing:
         raise SystemExit(f"키가 없습니다: {missing} — .env에 넣거나 --models로 모델을 고르세요")
 
-    report = {"split": split, "repeats": repeats, "system_prompt_hash": prompt_hash(""), "models": {}}
+    report = {"split": split, "repeats": repeats, "variant": variant,
+              "system_prompt_hash": prompt_hash("", variant), "models": {}}
     for name in names:
         jobs = [(record, rep) for record in records for rep in range(1, repeats + 1)]
         with concurrent.futures.ThreadPoolExecutor(max_workers=WORKERS) as pool:
-            calls = list(pool.map(lambda job: fetch(name, job[0], job[1], split), jobs))
+            calls = list(pool.map(lambda job: fetch(name, job[0], job[1], split, variant), jobs))
         errors = [f"{c['id']} r{c['rep']}: {c['call_error']}" for c in calls if "call_error" in c]
         if errors:
             # 호출 오류(한도 초과, 네트워크, 잘못된 모델 ID)는 모델의 오답이 아니다. 채점하면 적중률이 깎여 보이므로
@@ -335,7 +356,7 @@ def run(split: str, names: list[str], repeats: int) -> None:
         }
 
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    path = LLM_RUNS_DIR / f"{split}_{stamp}.json"
+    path = LLM_RUNS_DIR / (f"{split}_{stamp}.json" if variant == "base" else f"{split}_{variant}_{stamp}.json")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({**report, "run_at": stamp}, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"\n범위 적중률 목표 {TARGET_HIT_RATE:.0%}. [OK] {len(records)}건 × {repeats}회 × {len(names)}모델 → {path}")
@@ -347,6 +368,7 @@ def main() -> None:
     parser.add_argument("--final", action="store_true", help="평가용(eval) 세트 실행 확인 — 마지막 비교 때 한 번만")
     parser.add_argument("--models", nargs="+", choices=list(MODELS), default=list(MODELS))
     parser.add_argument("--repeats", type=int, default=1)
+    parser.add_argument("--variant", choices=list(PROMPT_VARIANTS), default="base", help="프롬프트 조건")
     parser.add_argument("--check", action="store_true", help="키와 모델 ID만 확인 (과금 없음)")
     parser.add_argument("--dry-run", action="store_true", help="첫 레코드의 프롬프트만 출력 (과금 없음)")
     args = parser.parse_args()
@@ -358,9 +380,9 @@ def main() -> None:
     if args.repeats < 1:
         parser.error("--repeats는 1 이상")
     if args.dry_run:
-        print(SYSTEM_PROMPT, "\n\n---\n", build_user_prompt(load_records(args.split)[0]), sep="")
+        print(system_prompt(args.variant), "\n\n---\n", build_user_prompt(load_records(args.split)[0]), sep="")
         return
-    run(args.split, args.models, args.repeats)
+    run(args.split, args.models, args.repeats, args.variant)
 
 
 if __name__ == "__main__":
