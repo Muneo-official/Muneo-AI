@@ -67,22 +67,21 @@ def test_total_range_아래_위_마진을_사례_수에_따라_줄인다(n_cases
     assert got_hi == pytest.approx(10_000_000 * hi, abs=1)
 
 
-async def test_전체_시공_중간값은_참고_사례_총액의_중앙값이다():
+async def test_전체_시공_중간값은_공종_중간값의_합이다():
     out = await _generate(TOTALS_13, "전체", ["도배"])
     총 = out["총_견적_범위"]
-    assert 총["중간"] == statistics.median(TOTALS_13)
+    # 사례의 총금액(중앙값 3,200만)이 아니라 요청한 도배의 중간값 1,600만 + 마감 3%
+    assert 총["중간"] == int(16_000_000 * 1.03)
     # 범위는 위로 더 넓다 — 중간값은 범위의 중점이 아니다
-    assert 총["최소"] == pytest.approx(32_000_000 * 0.96, abs=1)
-    assert 총["최대"] == pytest.approx(32_000_000 * 1.23, abs=1)
+    assert 총["최소"] == pytest.approx(16_000_000 * 0.96 * 1.03, abs=2)
+    assert 총["최대"] == pytest.approx(16_000_000 * 1.23 * 1.03, abs=2)
     assert 총["중간"] < (총["최소"] + 총["최대"]) // 2
 
 
-async def test_전체_시공은_마감비를_총액에_더하지_않고_총액_안의_몫으로_표시한다():
+async def test_전체_시공은_사례에_공과잡비_금액이_없으면_마감비를_비율로_더한다():
     out = await _generate(TOTALS_13, "전체", ["도배"])
-    총, 마감 = out["총_견적_범위"], out["공종별_단가_범위"]["마감/공과잡비"]
-    assert 총["중간"] == 32_000_000  # 3%가 곱해지지 않은 값
-    assert 마감 == {"최소": int(총["최소"] * 0.03), "중간": int(총["중간"] * 0.03), "최대": int(총["최대"] * 0.03)}
-    assert "마감/공과잡비는 총액에 포함된 금액 중 약 3%로 표시" in out["보정_적용"]
+    assert out["공종별_단가_범위"]["마감/공과잡비"]["중간"] == int(16_000_000 * 0.03)
+    assert "마감/공과잡비 포함 (총 공사비의 3%)" in out["보정_적용"]
 
 
 async def test_부분_시공_중간값은_공종_중간값의_합이다():
