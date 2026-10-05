@@ -3,6 +3,7 @@ eval/quote_benchmark.py — 가견적 채점: 정답셋의 입력으로 엔진�
 
     python -m eval.quote_benchmark                  # 개선용(dev) 세트 채점
     python -m eval.quote_benchmark --split eval --final   # 평가용 세트 — 마지막 비교 때 한 번만
+    python -m eval.quote_benchmark --split holdout --final   # 검증용 세트 — 평가용을 연 뒤의 수정을 검증할 때
 
 `/estimates/generate`가 부르는 EstimateEngine.generate()를 같은 설정(리랭커 사용 여부, 후보 풀, 활성 보정계수)으로
 직접 호출한다. 정답으로 뽑은 견적은 코퍼스에 그대로 남아 있으므로, 채점할 때는 같은 의뢰(request_url)의 사례를
@@ -40,10 +41,11 @@ from app.domain.estimate_engine import ENGINE_VERSION, EstimateEngine
 from app.repositories.case_repository import CaseRepository
 from app.repositories.coefficient_repository import CoefficientRepository
 from app.schemas.estimate import EstimateRequest
-from eval.quote_ground_truth import GROUND_TRUTH_PATH, REVIEW_DIR, 공종_순서
+from eval.quote_ground_truth import GROUND_TRUTH_PATH, HOLDOUT, REVIEW_DIR, 공종_순서
 
 load_dotenv()
 
+SPLITS = ["dev", "eval", HOLDOUT]
 TARGET_HIT_RATE = 0.80
 # 같은 폭 적중률의 폭 — 엔진이 참고 사례를 12건 이상 모았을 때 부르는 총액 범위의 폭. 중간값에서 위아래로 절반씩
 COMMON_WIDTH = 0.27
@@ -272,9 +274,9 @@ def load_records(split: str) -> list[dict]:
 
 
 def require_final(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
-    """평가용 세트 결과를 보면서 엔진이나 프롬프트를 고치면 세트를 나눈 의미가 없어진다. 실수로 돌리지 않게 막는다."""
-    if args.split == "eval" and not args.final:
-        parser.error("평가용 세트는 마지막 비교 때만 실행합니다. 정말 실행하려면 --final")
+    """평가용·검증용 세트 결과를 보면서 엔진이나 프롬프트를 고치면 세트를 나눈 의미가 없어진다. 실수로 돌리지 않게 막는다."""
+    if args.split != "dev" and not args.final:
+        parser.error("평가용·검증용 세트는 마지막 비교 때만 실행합니다. 정말 실행하려면 --final")
 
 
 async def run(split: str) -> None:
@@ -337,8 +339,8 @@ async def run(split: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--split", choices=["dev", "eval"], default="dev")
-    parser.add_argument("--final", action="store_true", help="평가용(eval) 세트 실행 확인 — 마지막 비교 때 한 번만")
+    parser.add_argument("--split", choices=SPLITS, default="dev")
+    parser.add_argument("--final", action="store_true", help="평가용(eval)·검증용(holdout) 세트 실행 확인 — 마지막 비교 때 한 번만")
     args = parser.parse_args()
     require_final(parser, args)
     sys.stdout.reconfigure(encoding="utf-8")  # 출력을 파일로 돌리면 Windows 기본 인코딩(cp949)이라 '—'에서 멈춘다
