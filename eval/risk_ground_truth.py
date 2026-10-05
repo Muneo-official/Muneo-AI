@@ -31,7 +31,7 @@ from eval.risk_defects import plant, type_order
 
 load_dotenv()
 
-RULES_VERSION = "1.1"
+RULES_VERSION = "1.2"  # 1.2: 섹션 소계나 줄의 계산이 스스로 안 맞는 견적서도 바탕에서 뺀다
 RISK_GT_PATH = pathlib.Path(__file__).parent / "test_inputs" / "risk_ground_truth.json"
 # 검수 시트와 만든 이미지는 품목 원문이 통째로 들어가므로 커밋하지 않는 위치에 둔다
 RISK_DIR = pathlib.Path(__file__).parent.parent / "estimate_data" / "_risk_gt"
