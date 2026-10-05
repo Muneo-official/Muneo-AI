@@ -26,20 +26,38 @@ REQUIRED_LINES = [
     ("전기", ("인건비",)), ("조명", ("인건비",)), ("가구", ("상판", "인건비")),
 ]
 CARRYING_WORDS = ("양중", "운반", "사다리차")
+# 조건 누락(M2)은 "엘리베이터 없는 고층"으로 만든다. 승강기 보양·이용료 줄이 남아 있으면 견적서가 스스로 모순된다
+ELEVATOR_WORDS = ("승강기", "엘리베이터", "엘레베이터")
 # 금액을 올리고 내려도 "시세"를 말할 수 없는 섹션(입력으로 표현할 수 없는 공사, 잡비)
 NO_PRICE_SECTIONS = ("확장", "기타")
 MEASURED_UNITS = ("평", "m2", "㎡", "자", "개", "장", "m")
 _SPEC_RE = re.compile(r"\(.*?\)|/.*$|\d+\s*[*×xX]\s*\d+(\s*[*×xX]\s*\d+)?|\d+(\.\d+)?\s*(mm|T|t|W|인치)")
 
 
-def _recompute(doc: dict, base_direct: int) -> None:
-    """소계를 뺀 나머지 합계(공사비·간접비·총액)를 품목 표에 맞춘다. 간접비는 공사비에 비례해 다시 계산한다."""
+def _rounding_unit(total: int) -> int:
+    """원본이 총액을 어느 자리에서 끊었는지. 총액 95,500,000이면 100,000, 끊지 않았으면 1."""
+    unit = 1
+    while unit < 1_000_000 and total % (unit * 10) == 0:
+        unit *= 10
+    return unit
+
+
+def _recompute(doc: dict, clean: dict) -> None:
+    """소계를 뺀 나머지 합계(공사비·간접비·총액)를 품목 표에 맞춘다.
+
+    공사비가 그대로면 간접비와 총액도 깨끗한 판 그대로 둔다 — 두 판의 차이는 심은 결함뿐이어야 한다.
+    공사비가 바뀌면 간접비를 공사비에 비례해 다시 계산하고, 단수는 원본이 끊은 자리에 맞춘다.
+    """
     doc["direct"] = sum(s["subtotal"] for s in doc["sections"])
-    ratio = doc["direct"] / base_direct if base_direct else 1.0
-    indirect = {k: round(v * ratio) for k, v in doc["indirect"].items() if "단수" not in k}
-    rounding = [k for k in doc["indirect"] if "단수" in k]
-    if rounding:  # 원본처럼 만 원 아래를 버린다
-        indirect[rounding[0]] = -((doc["direct"] + sum(indirect.values())) % 10_000)
+    if doc["direct"] == clean["direct"]:
+        doc["indirect"], doc["total"] = dict(clean["indirect"]), clean["total"]
+        return
+    ratio = doc["direct"] / clean["direct"]
+    indirect = {k: round(v * ratio) for k, v in clean["indirect"].items() if "단수" not in k}
+    for key in (k for k in clean["indirect"] if "단수" in k):
+        unit = _rounding_unit(clean["total"])
+        # 원본이 끊지 않은 총액이면(부가세에서 거꾸로 구한 값 등) 단수를 그대로 둔다
+        indirect[key] = -((doc["direct"] + sum(indirect.values())) % unit) if unit > 1 else clean["indirect"][key]
     doc["indirect"] = indirect
     doc["total"] = doc["direct"] + sum(indirect.values())
 
@@ -75,19 +93,28 @@ def _apply_m1(doc, slot):
     return {"section": sec["name"], "desc": line["desc"], "detail": f"'{line['desc']}' 줄({line['amount']:,}원)을 지움"}
 
 
+def _m2_lines(sec: dict) -> list[int]:
+    return [li for li, line in enumerate(sec["lines"]) if any(w in line["desc"] for w in CARRYING_WORDS + ELEVATOR_WORDS)]
+
+
 def _slots_m2(doc):
-    return [0]  # 공사 정보를 바꾸는 결함이라 자리는 하나다
+    # 공사 정보를 바꾸는 결함이라 자리는 하나다. 지울 줄이 섹션의 전부인 견적서에는 심지 않는다(빈 섹션이 생긴다)
+    return [] if any(len(_m2_lines(s)) == len(s["lines"]) for s in doc["sections"]) else [0]
 
 
 def _apply_m2(doc, slot):
-    removed = []
-    for sec in doc["sections"]:
-        keep = [line for line in sec["lines"] if not any(w in line["desc"] for w in CARRYING_WORDS)]
-        removed += [line["desc"] for line in sec["lines"] if line not in keep]
-        sec["lines"] = keep
-        _resum(sec)
+    """9층·엘리베이터 없음으로 바꾸고, 양중·운반 줄과 승강기 줄을 지운다. 줄을 지운 섹션만 소계를 다시 낸다."""
+    removed, touched = 0, []
+    for si, sec in enumerate(doc["sections"]):
+        drop = set(_m2_lines(sec))
+        if drop:
+            sec["lines"] = [line for li, line in enumerate(sec["lines"]) if li not in drop]
+            _resum(sec)
+            removed += len(drop)
+            touched.append(si)
     doc["info"] = {**doc["info"], "층수": 9, "엘리베이터": False}
-    return {"section": None, "desc": "양중/운반", "detail": f"9층·엘리베이터 없음, 양중·운반 줄 없음(지운 줄 {len(removed)}개)"}
+    return {"section": None, "desc": "양중/운반", "touched": touched,
+            "detail": f"9층·엘리베이터 없음, 양중·운반 줄 없음(양중·운반·승강기 줄 {removed}개를 지움)"}
 
 
 def _slots_d1(doc):
@@ -223,24 +250,35 @@ def _slot_sections(slot) -> set[int]:
 def plant(clean: dict, types: list[str], rng: random.Random, n: int = N_DEFECTS) -> tuple[dict, list[dict]]:
     """깨끗한 판에 결함 n개를 심는다. types의 앞에서부터 시도하고, 심을 자리가 없는 유형은 건너뛴다.
 
-    반환: (결함 판, 심은 결함 목록). 자리는 깨끗한 판을 기준으로 고른다(앞에서 심은 결함이 뒤의 자리를 바꾸지 않게).
-    그래서 한 섹션에는 결함을 하나만 심는다.
+    반환: (결함 판, 심은 결함 목록 — types의 순서대로). 한 섹션에는 결함을 하나만 심는다. 자리는 그때까지 고친
+    문서에서 고르되, 이미 건드린 섹션은 빼므로 앞에서 심은 결함이 뒤의 결함에 덮이지 않는다.
+
+    조건 누락(M2)은 여러 섹션의 줄을 지우므로, 심기로 정해지면 다른 결함보다 먼저 적용한다. 나중에 적용하면 앞에서
+    심은 결함의 줄 번호가 밀리거나, 일부러 틀리게 적은 소계가 되돌아간다.
     """
     doc = copy.deepcopy(clean)
-    planted, used = [], set()
-    for t in types:
+    # 깨끗한 판에 자리가 있는 유형 가운데 앞에서 n개가 심을 후보다. 섹션이 겹쳐 못 심으면 그 뒤의 유형으로 넘어간다
+    available = [t for t in types if _DEFECTS[t][0](clean)]
+    planted: dict[str, dict] = {}
+    used: set[int] = set()
+    if "M2" in available[:n]:
+        result = _apply_m2(doc, 0)
+        used |= set(result.pop("touched"))
+        planted["M2"] = {"type": "M2", "kind": KIND["M2"], **result}
+    for t in available:
         if len(planted) == n:
             break
+        if t == "M2":
+            continue  # 앞의 n개 안에 들었으면 이미 심었고, 아니면 다른 결함 뒤에는 심지 않는다
         slots_fn, apply_fn = _DEFECTS[t]
-        slots = [s for s in slots_fn(clean) if t == "M2" or not (_slot_sections(s) & used)]
+        slots = [s for s in slots_fn(doc) if not (_slot_sections(s) & used)]
         if not slots:
             continue
         slot = rng.choice(slots)
-        if t != "M2":
-            used |= _slot_sections(slot)
-        planted.append({"type": t, "kind": KIND[t], **apply_fn(doc, slot)})
-    _recompute(doc, clean["direct"])
-    return doc, planted
+        used |= _slot_sections(slot)
+        planted[t] = {"type": t, "kind": KIND[t], **apply_fn(doc, slot)}
+    _recompute(doc, clean)
+    return doc, [planted[t] for t in types if t in planted]
 
 
 def type_order(index: int, seed: int) -> list[str]:

@@ -84,15 +84,12 @@ def next_bases(quote_records: list[dict], records: list[dict]) -> list[dict]:
         return []
     used = {r["source"]["quote_id"] for r in records}
     free = [q for q in base_pool(quote_records, records[0]["seed"]) if q["id"] not in used]
-    need: dict[str, int] = defaultdict(int)
-    for r in records:
-        need[r["split"]] += r["status"] == "excluded"
-        need[r["split"]] -= bool(r.get("replaces"))  # 이미 대체한 만큼은 뺀다
+    replaced = {r["replaces"] for r in records if r.get("replaces")}
     out = []
-    for split in ("dev", "eval"):
-        for _ in range(max(need[split], 0)):
-            if free:
-                out.append({"quote_id": free.pop(0)["id"], "split": split})
+    for r in records:
+        if r["status"] == "excluded" and r["id"] not in replaced and free:
+            # 대신 들어오는 견적서는 빠진 견적서의 유형 순번을 물려받는다 — 다른 견적서의 결함이 바뀌지 않게
+            out.append({"quote_id": free.pop(0)["id"], "split": r["split"], "replaces": r["id"], "order": r["order"]})
     return out
 
 
@@ -102,14 +99,16 @@ def sample(seed: int, force: bool) -> None:
     quote_records = json.loads(QUOTE_GT_PATH.read_text(encoding="utf-8"))
     picked = pick_bases(quote_records, seed)
     by_id = {r["id"]: r for r in quote_records}
-    records = [_new_record(i, by_id[p["quote_id"]], p["split"], seed) for i, p in enumerate(picked, 1)]
+    records = [_new_record(i, by_id[p["quote_id"]], p["split"], seed, order=i - 1) for i, p in enumerate(picked, 1)]
     _save(records)
     print(f"[OK] 바탕 견적서 {len(records)}건 (개선용 {N_DEV}, 평가용 {len(records) - N_DEV}) → {RISK_GT_PATH}")
 
 
-def _new_record(seq: int, q: dict, split: str, seed: int) -> dict:
+def _new_record(seq: int, q: dict, split: str, seed: int, order: int) -> dict:
     return {
         "id": f"rk-{seq:03d}", "status": "draft", "split": split, "rules_version": RULES_VERSION, "seed": seed,
+        # 심을 유형을 정하는 순번. 레코드에 적어 두어, 다른 견적서를 제외하거나 더해도 이 견적서의 결함이 바뀌지 않는다
+        "order": order,
         "source": {"quote_id": q["id"], "article_id": q["source"]["article_id"], "request_url": q["source"].get("request_url")},
         # 층수·엘리베이터는 견적서에 없다. 양중 비용이 문제 되지 않는 값으로 두고, 조건 누락 결함(M2)만 이 값을 바꾼다
         "info": {"평수": q["input"]["평수"], "지역": q["input"]["지역"], "공간유형": q["input"]["공간유형"],
@@ -124,8 +123,8 @@ def replace() -> None:
     by_id = {r["id"]: r for r in quote_records}
     added = next_bases(quote_records, records)
     for p in added:
-        record = _new_record(len(records) + 1, by_id[p["quote_id"]], p["split"], records[0]["seed"])
-        record["replaces"] = True
+        record = _new_record(len(records) + 1, by_id[p["quote_id"]], p["split"], records[0]["seed"], order=p["order"])
+        record["replaces"] = p["replaces"]
         records.append(record)
         print(f"  {record['id']} ({p['split']}, {p['quote_id']}) 추가")
     _save(records)
@@ -266,15 +265,14 @@ def build() -> None:
 
     records = _load()
     RISK_DIR.mkdir(parents=True, exist_ok=True)
-    usable = [r for r in records if r["status"] != "excluded"]
-    for index, r in enumerate(usable):
+    for r in records:
         if r["status"] != "verified":
-            continue  # 원본과 대조를 마친 견적서에만 심는다. 순번은 건너뛰지 않아 유형이 고르게 돌아간다
+            continue  # 원본과 대조를 마친 견적서에만 심는다
         if check_record(r):
             raise SystemExit(f"{r['id']}: 검산이 안 맞는 견적서에는 결함을 심지 않는다 — check를 먼저 통과시킬 것")
         clean = clean_doc(r)
         rng = random.Random(f"{r['seed']}-{r['id']}")
-        r["planted_doc"], r["planted"] = plant(clean, type_order(index, r["seed"]), rng)
+        r["planted_doc"], r["planted"] = plant(clean, type_order(r["order"], r["seed"]), rng)
         clean_path, planted_path = image_paths(r["id"])
         render(clean, clean_path)
         render(r["planted_doc"], planted_path)

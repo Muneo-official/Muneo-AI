@@ -26,6 +26,7 @@ from collections import Counter
 
 from dotenv import load_dotenv
 
+from eval.quote_benchmark import require_final
 from eval.risk_defects import CARRYING_WORDS, DEFECT_TYPES
 from eval.risk_ground_truth import RISK_DIR, RISK_GT_PATH, image_paths
 
@@ -74,8 +75,7 @@ def muneo_findings(report: dict) -> list[dict]:
         for item in section["items"]:
             if item["status"] == "정상":
                 continue
-            text = f"{item['title']} {item['description']}"
-            kind, trade, direction, extra = item["status"], section["process"], None, ""
+            kind, trade, direction = item["status"], section["process"], None
             if "시세 범위" in item["title"]:
                 # 화면에는 "불분명"으로 나가지만 가격 지적이다. 방향은 견적 금액이 범위의 어느 쪽에 있는지로 정한다
                 kind = "가격"
@@ -83,16 +83,21 @@ def muneo_findings(report: dict) -> list[dict]:
                 if m:
                     amount, lo, hi = (int(g.replace(",", "")) for g in m.groups())
                     direction = "과다" if amount > hi else "과소" if amount < lo else None
-                    extra = str(amount)
-            elif any(w in text for w in CARRYING_WORDS):
-                kind, trade = "누락", COMMON
-            out.append({"trade": trade, "kind": kind, "direction": direction, "extra": extra, "text": text})
+            elif trade == COMMON:
+                # 공종 없이 나오는 지적은 고층 양중·운반 비용뿐이다. 품명에 "운반"이 든 줄의 중복·불분명 지적과 섞이지
+                # 않게, 글에 든 낱말이 아니라 공종으로 가린다
+                kind = "누락"
+            out.append({"trade": trade, "kind": kind, "direction": direction, "text": f"{item['title']} {item['description']}"})
     return out
 
 
 def _key(finding: dict) -> tuple:
-    """같은 지적인지 가리는 열쇠. 가격 지적은 금액이 달라지면 다른 지적이다."""
-    return (finding["kind"], finding["trade"], finding["extra"])
+    """같은 지적인지 가리는 열쇠 — 종류, 공종, 방향.
+
+    금액은 넣지 않는다. 깨끗한 판에서 이미 "가구가 시세보다 높다"고 한 시스템이 결함 판에서 금액만 바뀐 같은 지적을
+    내면, 그것은 결함을 찾은 것이 아니라 늘 하던 지적이다.
+    """
+    return (finding["kind"], finding["trade"], finding["direction"])
 
 
 def new_findings(clean: list[dict], planted: list[dict]) -> list[dict]:
@@ -119,13 +124,28 @@ def points_at(finding: dict, defect: dict) -> bool:
     return "direction" not in defect or finding["direction"] in (None, defect["direction"])
 
 
+def assign(defects: list[dict], fresh: list[dict]) -> list[bool]:
+    """새 지적을 심은 결함에 하나씩 배정한다. 반환: 결함마다 찾았는지.
+
+    지적 하나가 결함 둘을 찾은 것이 되면 안 된다 — 욕실·타일·수전처럼 같은 공종 묶음에 같은 종류의 결함이 둘
+    심기면, "욕실이 비싸다" 한 줄로 둘 다 찾은 것이 된다.
+    """
+    taken: set[int] = set()
+    found = []
+    for defect in defects:
+        hit = next((i for i, f in enumerate(fresh) if i not in taken and points_at(f, defect)), None)
+        if hit is not None:
+            taken.add(hit)
+        found.append(hit is not None)
+    return found
+
+
 def score_record(planted_defects: list[dict], clean: list[dict], planted: list[dict]) -> dict:
     fresh = new_findings(clean, planted)
-    found = [any(points_at(f, d) for f in fresh) for d in planted_defects]
+    found = assign(planted_defects, fresh)
     return {
         "defects": [{"type": d["type"], "section": d["section"], "found": hit} for d, hit in zip(planted_defects, found)],
-        "clean_count": len(clean), "planted_count": len(planted), "new_count": len(fresh),
-        "new_hits": sum(any(points_at(f, d) for d in planted_defects) for f in fresh),
+        "clean_count": len(clean), "planted_count": len(planted), "new_count": len(fresh), "new_hits": sum(found),
     }
 
 
@@ -192,42 +212,20 @@ def region_text(info: dict) -> str:
     return "경기" if info["지역"] == "수도권" else info["지역"]
 
 
-def require_final(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
-    """평가용 세트 결과를 보면서 진단이나 프롬프트를 고치면 세트를 나눈 의미가 없어진다. 실수로 돌리지 않게 막는다."""
-    if args.split != "dev" and not args.final:
-        parser.error("평가용 세트는 마지막 비교 때만 실행합니다. 정말 실행하려면 --final")
-
-
 async def run(split: str) -> None:
-    from motor.motor_asyncio import AsyncIOMotorClient
-    from sentence_transformers import CrossEncoder, SentenceTransformer
-
-    from app.core.config import get_settings
-    from app.domain.estimate_engine import EstimateEngine
+    from app.domain.estimate_engine import ENGINE_VERSION
     from app.domain.risk_detector_service import RiskDetectorService
-    from app.repositories.coefficient_repository import CoefficientRepository
     from app.schemas.risk import AnalyzeRiskCommand
-    from eval.quote_benchmark import LeaveOutCaseRepository
+    from eval.quote_benchmark import build_engine
+    from pipeline.vision_client import RISK_MODEL
 
     records = load_records(split)
-    # app/core/deps.py의 lifespan과 같은 구성 — 서비스와 다른 설정으로 채점하면 의미가 없다
-    settings = get_settings()
-    client = AsyncIOMotorClient(settings.mongo_uri, maxPoolSize=settings.mongo_max_pool_size,
-                                serverSelectionTimeoutMS=settings.mongo_server_selection_timeout_ms)
-    db = client[settings.mongo_db_name]
-    repo = LeaveOutCaseRepository(db["estimate_cases"], settings)
-    engine = EstimateEngine(
-        case_repository=repo, embedder=SentenceTransformer(settings.embed_model),
-        reranker=CrossEncoder(settings.reranker_model, max_length=512) if settings.use_reranker else None,
-        vector_candidate_pool=settings.vector_candidate_pool,
-        coefficients=await CoefficientRepository(collection=db["correction_coefficients"]).get_active(),
-        window_includes_door=settings.estimate_window_includes_door,
-    )
+    client, settings, repo, engine, coefficients = await build_engine()
     RISK_DIR.mkdir(parents=True, exist_ok=True)
     service = RiskDetectorService(engine, settings.risk_vision_max_concurrency,
                                   settings.risk_vision_max_concurrency_per_request, parse_cache=LocalParseCache())
 
-    async def analyze(record: dict, doc: dict, path) -> list[dict]:
+    async def analyze(doc: dict, path) -> list[dict]:
         info = doc["info"]
         report = await service.analyze(AnalyzeRiskCommand(
             space_type=info["공간유형"], pyeong=info["평수"], room_count=3, floor=info["층수"], elevator=info["엘리베이터"],
@@ -236,21 +234,24 @@ async def run(split: str) -> None:
 
     rows, details = [], []
     for record in records:
+        # 가격 비교의 참고 사례에서 이 견적서와 같은 의뢰의 사례를 뺀다. 두 판은 같은 의뢰라 함께 돌려도 된다
         await repo.leave_out(record["source"].get("request_url"), record["source"].get("article_id"))
         clean_path, planted_path = image_paths(record["id"])
-        clean = await analyze(record, record, clean_path)
-        planted = await analyze(record, record["planted_doc"], planted_path)
+        clean, planted = await asyncio.gather(analyze(record, clean_path), analyze(record["planted_doc"], planted_path))
         row = {"id": record["id"], **score_record(record["planted"], clean, planted)}
         rows.append(row)
-        details.append({**row, "clean": clean, "planted": planted, "new": new_findings(clean, planted)})
+        details.append({**row, "clean": clean, "planted": planted})
     client.close()
 
     summary = summarize(rows)
     RUNS_DIR.mkdir(parents=True, exist_ok=True)
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     path = RUNS_DIR / f"{split}_{stamp}.json"
-    path.write_text(json.dumps({"split": split, "run_at": stamp, "summary": summary, "records": details},
-                               ensure_ascii=False, indent=2), encoding="utf-8")
+    path.write_text(json.dumps({
+        "split": split, "run_at": stamp, "engine_version": ENGINE_VERSION, "risk_model": RISK_MODEL,
+        "coefficient_version": coefficients.get("version", "default"), "use_reranker": settings.use_reranker,
+        "summary": summary, "records": details,
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
     print_report(rows, summary)
     print(f"\n[OK] {len(rows)}건 채점 → {path}")
 

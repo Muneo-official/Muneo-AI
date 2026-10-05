@@ -279,11 +279,12 @@ def require_final(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
         parser.error("평가용·검증용 세트는 마지막 비교 때만 실행합니다. 정말 실행하려면 --final")
 
 
-async def run(split: str) -> None:
-    records = load_records(split)
+async def build_engine():
+    """채점에 쓰는 엔진. 반환: (Mongo 클라이언트, 설정, 의뢰를 빼는 저장소, 엔진, 활성 보정계수).
 
-    # app/core/deps.py의 lifespan과 같은 구성 — 서비스와 다른 설정으로 채점하면 의미가 없다.
-    # lifespan에 엔진 인자나 설정이 추가되면 여기도 같이 고친다
+    app/core/deps.py의 lifespan과 같은 구성 — 서비스와 다른 설정으로 채점하면 의미가 없다. lifespan에 엔진 인자나
+    설정이 추가되면 여기를 고친다. 리스크 채점(eval/risk_benchmark.py)도 이 함수를 쓴다.
+    """
     settings = get_settings()
     client = AsyncIOMotorClient(
         settings.mongo_uri,
@@ -300,6 +301,12 @@ async def run(split: str) -> None:
         vector_candidate_pool=settings.vector_candidate_pool, coefficients=coefficients,
         window_includes_door=settings.estimate_window_includes_door,
     )
+    return client, settings, repo, engine, coefficients
+
+
+async def run(split: str) -> None:
+    records = load_records(split)
+    client, settings, repo, engine, coefficients = await build_engine()
 
     rows, details = [], []
     for record in records:

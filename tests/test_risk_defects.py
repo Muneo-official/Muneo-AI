@@ -25,7 +25,8 @@ def _doc() -> dict:
         {"name": "가구공사", "lines": [_line("301", "싱크 하부장(Pet)/인조대리석/E0", 150_000, 15, "자"), _line("302", "인건비", 300_000, 1, "M/D")]},
         {"name": "도배공사", "lines": [_line("401", "실크벽지(LX 베스띠)", 11_000, 90, "평"), _line("402", "부자재(풀, 부직포)", 300_000, 1),
                                    _line("403", "인건비", 280_000, 5, "M/D")]},
-        {"name": "기타공사", "lines": [_line("501", "자재 양중", 200_000, 1), _line("502", "승강기 보양", 150_000, 1)]},
+        {"name": "기타공사", "lines": [_line("501", "자재 양중", 200_000, 1), _line("502", "승강기 보양", 150_000, 1),
+                                   _line("503", "주민동의서 대행료", 150_000, 1)]},
     ]
     for s in sections:
         s["subtotal"] = sum(line["amount"] for line in s["lines"])
@@ -65,7 +66,7 @@ def test_깨끗한_판은_바뀌지_않는다():
 def test_계산_오류를_빼면_결함_판의_합계는_스스로_맞는다(defect_type):
     _, doc, _ = _plant(defect_type)
     assert _consistent(doc)
-    assert doc["total"] % 10_000 == 0  # 단수는 원본처럼 만 원 아래를 버린다
+    assert doc["total"] % 10_000 == 0  # 단수는 원본이 끊은 자리(만 원)에 맞춘다
 
 
 def test_필수_항목_누락은_표에_있는_줄만_지운다():
@@ -77,11 +78,49 @@ def test_필수_항목_누락은_표에_있는_줄만_지운다():
         assert planted["section"] != "철거공사" or "폐기물" in planted["desc"]  # 철거에서는 폐기물 처리만 지운다
 
 
-def test_조건_누락은_공사_정보를_고층으로_바꾸고_양중_줄을_지운다():
+def test_조건_누락은_엘리베이터_없는_고층으로_바꾸고_양중_줄과_승강기_줄을_지운다():
     _, doc, planted = _plant("M2")
     assert doc["info"]["층수"] >= 5 and doc["info"]["엘리베이터"] is False
-    assert not any("양중" in line["desc"] for s in doc["sections"] for line in s["lines"])
-    assert planted["section"] is None
+    # 엘리베이터가 없다면서 승강기 보양 줄이 남아 있으면 견적서가 스스로 모순된다
+    assert not any(w in line["desc"] for s in doc["sections"] for line in s["lines"] for w in ("양중", "승강기"))
+    assert planted["section"] is None and "touched" not in planted
+
+
+def test_지울_줄이_섹션의_전부면_조건_누락을_심지_않는다():
+    clean = _doc()
+    clean["sections"][-1]["lines"] = clean["sections"][-1]["lines"][:2]  # 기타공사에 양중·승강기 줄만 남긴다
+    clean["sections"][-1]["subtotal"] = 350_000
+    _, planted = plant(clean, ["M2", "D1"], random.Random(1), n=1)
+    assert [p["type"] for p in planted] == ["D1"]
+
+
+def test_조건_누락은_먼저_적용돼_다른_결함을_지우거나_되돌리지_않는다():
+    # 계산 오류로 일부러 틀리게 적은 소계가 M2 뒤에도 남아 있어야 하고, 어떤 순서로 줘도 줄 번호가 밀려 깨지지 않는다
+    for seed in range(200):
+        doc, planted = plant(_doc(), ["C1", "D1", "M2"], random.Random(seed))
+        assert [p["type"] for p in planted] == ["C1", "D1", "M2"]
+        c1 = _section(doc, planted[0]["section"])
+        assert c1["subtotal"] > sum(line["amount"] for line in c1["lines"])
+        d1 = [line["desc"] for line in _section(doc, planted[1]["section"])["lines"]]
+        assert d1.count(planted[1]["desc"]) == 2
+
+
+def test_어떤_seed와_유형_순서로도_결함_세_개가_심긴다():
+    for seed in range(300):
+        rng = random.Random(seed)
+        order = DEFECT_TYPES[:]
+        rng.shuffle(order)
+        _, planted = plant(_doc(), order, rng)
+        assert len(planted) == N_DEFECTS
+
+
+def test_금액을_바꾸지_않는_결함은_간접비와_총액을_깨끗한_판_그대로_둔다():
+    clean = _doc()
+    clean["indirect"]["단수"] -= 3_000  # 원본이 만 원이 아닌 자리에서 끊은 경우
+    clean["total"] -= 3_000
+    for defect_type in ("U1", "U3"):
+        doc, _ = plant(clean, [defect_type], random.Random(1), n=1)
+        assert (doc["indirect"], doc["total"]) == (clean["indirect"], clean["total"])
 
 
 def test_중복은_같은_줄을_한_번_더_넣는다():

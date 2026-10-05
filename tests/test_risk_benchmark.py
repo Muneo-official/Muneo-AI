@@ -10,8 +10,8 @@ import pytest
 from eval import risk_benchmark as rb
 
 
-def _f(trade: str, kind: str, direction=None, extra: str = "", text: str = "") -> dict:
-    return {"trade": trade, "kind": kind, "direction": direction, "extra": extra, "text": text}
+def _f(trade: str, kind: str, direction=None, text: str = "") -> dict:
+    return {"trade": trade, "kind": kind, "direction": direction, "text": text}
 
 
 def _d(defect_type: str, kind: str, section, **more) -> dict:
@@ -36,12 +36,17 @@ def test_가격_지적은_불분명이_아니라_가격으로_세고_방향을_�
             "description": "견적 금액 9,000,000원이 유사 사례 시세 범위(2,000,000~6,000,000원, 중간값 4,000,000원)를 벗어납니다."}
     low = {**high, "description": "견적 금액 1,000,000원이 유사 사례 시세 범위(2,000,000~6,000,000원, 중간값 4,000,000원)를 벗어납니다."}
     got = rb.muneo_findings(_report(("가구", [high]), ("욕실", [low])))
-    assert [(f["kind"], f["direction"], f["extra"]) for f in got] == [("가격", "과다", "9000000"), ("가격", "과소", "1000000")]
+    assert [(f["kind"], f["direction"]) for f in got] == [("가격", "과다"), ("가격", "과소")]
 
 
 def test_양중_지적은_공종_없는_누락으로_센다():
     item = {"status": "불분명", "title": "고층 시공 운반/양중 비용 정보 미기재", "description": "9층 시공 조건이지만 …"}
     assert [(f["trade"], f["kind"]) for f in rb.muneo_findings(_report(("공통", [item])))] == [(rb.COMMON, "누락")]
+
+
+def test_품명에_운반이_든_줄의_중복_지적은_양중_지적으로_바뀌지_않는다():
+    item = {"status": "중복", "title": "동일 항목 중복 기재", "description": "철거 인건비(조공):자재운반포함 항목이 2회 반복되었습니다."}
+    assert [(f["trade"], f["kind"]) for f in rb.muneo_findings(_report(("철거", [item])))] == [("철거", "중복")]
 
 
 # ── 새 지적 ───────────────────────────────────────────────────────────────
@@ -59,10 +64,11 @@ def test_같은_지적이_늘어나면_늘어난_만큼만_새_지적이다():
     assert len(rb.new_findings(clean, planted)) == 2
 
 
-def test_가격_지적은_금액이_달라지면_새_지적이다():
-    clean = [_f("가구", "가격", "과다", extra="5000000")]
-    assert rb.new_findings(clean, [_f("가구", "가격", "과다", extra="5000000")]) == []
-    assert len(rb.new_findings(clean, [_f("가구", "가격", "과다", extra="10000000")])) == 1
+def test_가격_지적은_금액만_바뀌면_새_지적이_아니고_방향이_바뀌면_새_지적이다():
+    # 깨끗한 판에서 이미 "가구가 시세보다 높다"고 했으면, 결함 판에서 금액만 커진 같은 지적은 늘 하던 지적이다
+    clean = [_f("가구", "가격", "과다", text="견적 금액 5,000,000원")]
+    assert rb.new_findings(clean, [_f("가구", "가격", "과다", text="견적 금액 10,000,000원")]) == []
+    assert len(rb.new_findings(clean, [_f("가구", "가격", "과소", text="견적 금액 1,000,000원")])) == 1
 
 
 # ── 지적이 결함을 가리키는가 ───────────────────────────────────────────────
@@ -108,6 +114,16 @@ def test_깨끗한_판에도_있던_지적으로는_결함을_찾은_것이_되�
     always = [_f("욕실", "누락")]  # 결함과 무관하게 늘 나오는 지적
     assert rb.score_record(defects, clean=always, planted=always)["defects"][0]["found"] is False
     assert rb.score_record(defects, clean=[], planted=always)["defects"][0]["found"] is True
+
+
+def test_지적_하나로_결함_둘을_찾은_것이_되지_않는다():
+    # 도기공사와 수전공사는 같은 공종 묶음이다. "욕실이 시세보다 높다" 한 줄로 두 결함을 모두 찾은 것이 되면 안 된다
+    defects = [_d("P1", "가격", "도기공사", direction="과다"), _d("P2", "가격", "수전공사", direction="과다")]
+    row = rb.score_record(defects, clean=[], planted=[_f("욕실", "가격", "과다")])
+    assert [d["found"] for d in row["defects"]] == [True, False] and row["new_hits"] == 1
+
+    both = rb.score_record(defects, clean=[], planted=[_f("욕실", "가격", "과다"), _f("설비", "가격", "과다")])
+    assert [d["found"] for d in both["defects"]] == [True, True]
 
 
 def test_새_지적의_적중률은_심은_결함을_가리킨_새_지적의_비율이다():
