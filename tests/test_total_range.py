@@ -8,8 +8,6 @@ EstimateEngine.generate()의 총 견적 범위 단위테스트 — 중간값은 
 중앙값이 아니라 공종별 중간값의 합이다(tests/test_full_scope_total.py).
 """
 
-import statistics
-
 import pytest
 
 from app.domain.estimate_engine import EstimateEngine, _total_range
