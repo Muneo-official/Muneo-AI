@@ -74,8 +74,12 @@ def _fix_column_swap(item: dict) -> dict:
 def _chunk_dedup_key(item: dict) -> tuple:
     """청크가 겹친 구간에서 두 번 읽힌 같은 행을 가리는 열쇠.
 
-    공종(category)은 넣지 않는다. 같은 행이 청크마다 다른 공종으로 읽히는 일이 있어서(싱크볼이 한 청크에서는 가구,
-    다른 청크에서는 설비), 공종을 넣으면 그 행이 두 공종에 하나씩 남는다 — 공종 금액의 합이 총금액보다 커진다.
+    코드가 있는 행은 공종(category)을 넣지 않는다. 같은 행이 청크마다 다른 공종으로 읽히는 일이 있어서(싱크볼이 한
+    청크에서는 가구, 다른 청크에서는 설비), 공종을 넣으면 그 행이 두 공종에 하나씩 남는다 — 공종 금액의 합이
+    총금액보다 커진다. 코드가 행을 가려 주므로 공종 없이도 서로 다른 행이 합쳐지지 않는다.
+
+    코드가 없는 행은 공종을 남긴다. 코드 없이 (금액, 단가, 품명 앞 글자)만으로 가리면 목공의 "인건비 300,000"과
+    타일의 "인건비 300,000"이 한 줄로 합쳐져, 뒤쪽 공종의 금액이 사라진다.
     """
     code = item.get("code", "")
     amt = _safe_int(item.get("amount"))
@@ -83,7 +87,7 @@ def _chunk_dedup_key(item: dict) -> tuple:
     desc_pre = item.get("description", "")[:4]
     if code:
         return (code, amt, unit_p)
-    return (amt, unit_p, desc_pre)
+    return (item.get("category", ""), amt, unit_p, desc_pre)
 
 
 _AGGREGATE_KEYWORDS = {"합계", "소계", "총계", "공사비합계", "공사합계", "계", "합 계", "소 계"}

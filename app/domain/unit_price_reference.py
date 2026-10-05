@@ -14,6 +14,7 @@
 import re
 import statistics
 from collections import defaultdict
+from collections.abc import Callable
 from typing import Any
 
 from app.domain.risk_models import RiskIssue
@@ -39,6 +40,18 @@ Key = tuple[str, str]
 QuantityKey = tuple[str, str, str]  # (공종 묶음, 품명, 단위)
 
 
+def _to_int(value: Any) -> int:
+    """모델이나 코퍼스의 금액을 정수로. 숫자가 아닌 값은 0 — 한 줄 때문에 진단 전체가 실패하면 안 된다."""
+    try:
+        return int(float(str(value).replace(",", ""))) if value not in (None, "") else 0
+    except ValueError:
+        return 0
+
+
+def _category_of(item: dict[str, Any]) -> str:
+    return str(item.get("category") or "")
+
+
 def bucket(category: str) -> str:
     return _BUCKET.get(category, category)
 
@@ -62,7 +75,7 @@ def normalize_unit(unit: Any) -> str:
 def quantity_of(item: dict[str, Any]) -> float | None:
     """품목의 수량. 리스크 진단의 파싱은 수량을 내지 않으므로 금액 ÷ 단가로 구한다."""
     unit_price = usable_unit_price(item)
-    return int(item["amount"]) / unit_price if unit_price else None
+    return _to_int(item.get("amount")) / unit_price if unit_price else None
 
 
 def quantity_key(item: dict[str, Any]) -> QuantityKey | None:
@@ -72,7 +85,7 @@ def quantity_key(item: dict[str, Any]) -> QuantityKey | None:
 
 def usable_unit_price(item: dict[str, Any]) -> int | None:
     """비교에 쓸 수 있는 단가. 단가가 없거나 금액보다 큰 줄(열이 뒤바뀐 줄)은 쓰지 않는다."""
-    unit_price, amount = int(item.get("unit_price") or 0), int(item.get("amount") or 0)
+    unit_price, amount = _to_int(item.get("unit_price")), _to_int(item.get("amount"))
     return unit_price if 0 < unit_price <= amount else None
 
 
@@ -152,13 +165,17 @@ class UnitPriceReference:
             return "낮음", ref
         return None, ref
 
-    def issues(self, line_items: list[dict[str, Any]]) -> list[RiskIssue]:
-        """공종마다, 단가를 비교한 줄의 절반 이상이 같은 방향으로 벗어나면 지적한다."""
+    def issues(self, line_items: list[dict[str, Any]], process_of: Callable[[dict], str] = _category_of) -> list[RiskIssue]:
+        """공종마다, 단가를 비교한 줄의 절반 이상이 같은 방향으로 벗어나면 지적한다.
+
+        process_of: 품목의 공종 이름을 주는 함수. 리스크 진단은 분석기의 공종 이름("전기/조명" 등)을 넘겨, 단가
+        지적이 그 공종의 품목과 같은 자리에 나오게 한다.
+        """
         judged: dict[str, list[tuple[str | None, dict, dict]]] = defaultdict(list)
         for item in line_items:
             result = self.judge(item)
             if result is not None:
-                judged[bucket(str(item.get("category") or ""))].append((result[0], item, result[1]))
+                judged[process_of(item)].append((result[0], item, result[1]))
         issues = []
         for process, rows in judged.items():
             for direction in ("높음", "낮음"):
@@ -166,7 +183,7 @@ class UnitPriceReference:
                 if len(rows) < MIN_COMPARED_LINES or len(off) / len(rows) < MIN_SHARE:
                     continue
                 examples = ", ".join(
-                    f"'{item.get('description', '')}' {int(item['unit_price']):,}원(보통 {ref['p10']:,}~{ref['p90']:,}원)"
+                    f"'{item.get('description', '')}' {usable_unit_price(item):,}원(보통 {ref['p10']:,}~{ref['p90']:,}원)"
                     for item, ref in off[:MAX_EXAMPLES]
                 )
                 issues.append(RiskIssue(
@@ -178,7 +195,8 @@ class UnitPriceReference:
                 ))
         return issues
 
-    def quantity_issues(self, line_items: list[dict[str, Any]], pyeong: int) -> list[RiskIssue]:
+    def quantity_issues(self, line_items: list[dict[str, Any]], pyeong: int,
+                        process_of: Callable[[dict], str] = _category_of) -> list[RiskIssue]:
         """평수에 비해 수량이 지나치게 많은 줄을 지적한다(20평 집에 도배 125평).
 
         같은 품목·같은 단위의 평당 수량과 비교한다. 상위 10%의 QUANTITY_RATIO배를 넘어야 지적한다 — 확장한 집,
@@ -194,7 +212,7 @@ class UnitPriceReference:
                 continue
             unit = normalize_unit(item.get("unit"))
             issues.append(RiskIssue(
-                "불분명", bucket(str(item.get("category") or "")), "수량이 평수에 비해 많음",
+                "불분명", process_of(item), "수량이 평수에 비해 많음",
                 f"'{item.get('description', '')}' {quantity:g}{unit}은 {pyeong}평 집에 보통 들어가는 양"
                 f"(약 {ref['median'] * pyeong:.0f}{unit}, 많아도 {ref['p90'] * pyeong:.0f}{unit})보다 많습니다.",
                 "실측한 수량인지, 로스(여유분)를 얼마나 잡았는지 업체에 확인하세요.",

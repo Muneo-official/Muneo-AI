@@ -151,3 +151,24 @@ def test_수량이_많은_정상_견적서와_단위가_다른_줄은_지적하�
     assert ref.quantity_issues([_measured("도배", "실크벽지", 11_000, 120, "평")], pyeong=30) == []    # 상위 10%의 1.5배 안
     assert ref.quantity_issues([_measured("도배", "실크벽지", 3_400, 400, "m2")], pyeong=30) == []     # ㎡ 기준이 없다
     assert ref.quantity_issues([_measured("도배", "실크벽지", 11_000, 250, "평")], pyeong=0) == []
+
+
+# ── 코드 리뷰에서 나온 경우들 ──────────────────────────────────────────────
+
+
+def test_금액이_숫자가_아닌_줄은_건너뛴다():
+    # 모델이 "<UNKNOWN>"이나 "125,000" 같은 값을 낼 때가 있다. 한 줄 때문에 진단 전체가 실패하면 안 된다
+    assert usable_unit_price({"unit_price": "<UNKNOWN>", "amount": 600_000}) is None
+    assert usable_unit_price({"unit_price": "125,000", "amount": "3,000,000"}) == 125_000
+    bad = {"category": "도배", "description": "인건비", "unit_price": "<UNKNOWN>", "amount": None}
+    assert _reference().issues([bad, _item("도배", "인건비", 560_000), _item("도배", "실크벽지", 24_000)])
+
+
+def test_지적의_공종_이름은_넘겨받은_함수로_정한다():
+    # 분석기는 전기 품목을 "전기/조명"으로 부른다. 단가 지적이 다른 이름으로 나가면 품목과 다른 자리에 뜬다
+    cases = [_case(i, [_item("전기", "인건비", 250_000 + (i % 6) * 10_000), _item("전기", "배선공사", 400_000)]) for i in range(20)]
+    ref = UnitPriceReference(build_reference(cases))
+    items = [_item("전기", "인건비", 700_000), _item("전기", "배선공사", 1_200_000)]
+    assert [i.process for i in ref.issues(items)] == ["전기"]
+    assert [i.process for i in ref.issues(items, process_of=lambda item: "전기/조명")] == ["전기/조명"]
+    assert [i.title for i in ref.issues(items, process_of=lambda item: "전기/조명")] == ["전기/조명 단가가 시세보다 높음"]

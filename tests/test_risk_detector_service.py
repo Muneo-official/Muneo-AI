@@ -575,3 +575,46 @@ async def test_hashes_are_logged_even_without_cache(monkeypatch):
     [timing] = [f for e, f in events if e == "risk_analyze_timing"]
     assert len(timing["image_sha256"]) == 2
     assert timing["parse_cache_hits"] == 0
+
+
+# ── 여러 장을 합칠 때의 소계 행 ────────────────────────────────────────────
+
+
+class _TwoPageCache:
+    """이미지 두 장의 파싱 결과를 캐시에서 준다 — Vision을 부르지 않고 합치는 과정만 본다."""
+
+    def __init__(self, pages: list[list[dict]]):
+        self._pages = pages
+
+    async def get_many(self, keys):
+        from app.repositories.risk_parse_cache_repository import CachedParse
+        return {key: CachedParse(line_items=page, input_tokens=0, output_tokens=0) for key, page in zip(keys, self._pages)}
+
+    async def put(self, key, parsed):
+        pass
+
+
+async def test_앞_쪽과_겹쳐서_줄을_뺐으면_소계_검산을_하지_않는다():
+    # 1쪽과 2쪽에 같은 "양변기 300,000"이 있으면 2쪽 것이 빠진다. 그 상태로 2쪽의 소계를 검산하면 맞는 견적서에
+    # 계산 오류를 지적하게 된다
+    toilet = {"code": "", "category": "욕실", "description": "양변기", "amount": 300_000, "unit_price": 300_000}
+    page1 = [toilet, {"code": "", "category": "욕실", "description": "소계", "amount": 300_000, "unit_price": 0}]
+    page2 = [dict(toilet), {"code": "", "category": "욕실", "description": "세면기", "amount": 200_000, "unit_price": 200_000},
+             {"code": "", "category": "욕실", "description": "소계", "amount": 500_000, "unit_price": 0}]
+    service = RiskDetectorService(parse_cache=_TwoPageCache([page1, page2]))
+
+    items, _, _ = await service._parse_images([b"page-1", b"page-2"])
+
+    assert [i["description"] for i in items] == ["양변기", "세면기"]
+
+
+async def test_겹친_줄이_없으면_소계_행을_그대로_둔다():
+    page1 = [{"code": "101", "category": "도배", "description": "실크벽지", "amount": 900_000, "unit_price": 900_000},
+             {"code": "100", "category": "도배", "description": "소계", "amount": 900_000, "unit_price": 0}]
+    page2 = [{"code": "201", "category": "바닥", "description": "강마루", "amount": 3_000_000, "unit_price": 125_000},
+             {"code": "200", "category": "바닥", "description": "소계", "amount": 3_000_000, "unit_price": 0}]
+    service = RiskDetectorService(parse_cache=_TwoPageCache([page1, page2]))
+
+    items, _, _ = await service._parse_images([b"page-1", b"page-2"])
+
+    assert [i["description"] for i in items].count("소계") == 2

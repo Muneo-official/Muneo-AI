@@ -28,7 +28,7 @@ from app.domain.unit_price_reference import UnitPriceReference
 from app.repositories.risk_parse_cache_repository import CachedParse, RiskParseCacheRepository
 from app.schemas.risk import AnalyzeRiskCommand
 from pipeline.image_prep import prepare_chunks_from_bytes
-from pipeline.parsing import merge_chunk_results
+from pipeline.parsing import is_subtotal_row, merge_chunk_results
 from pipeline.vision_client import (
     RISK_PARSE_VERSION,
     VisionCallResult,
@@ -104,7 +104,8 @@ class RiskDetectorService:
             rule_analyze_s = rule_done_at - parsed_at
 
             price_issues = (
-                self.unit_prices.issues(all_items) + self.unit_prices.quantity_issues(all_items, command.pyeong)
+                self.unit_prices.issues(all_items, self.analyzer.process_of)
+                + self.unit_prices.quantity_issues(all_items, command.pyeong, self.analyzer.process_of)
                 if self.unit_prices else []
             )
             price_check_s = time.perf_counter() - rule_done_at
@@ -192,9 +193,16 @@ class RiskDetectorService:
         store_s = time.perf_counter() - put_started
 
         all_items: list[dict[str, Any]] = []
+        dropped = 0
         for key in keys:
             line_items = cached[key].line_items if key in cached else parsed[key][0]
-            all_items.extend(self._merge_across_images(all_items, line_items))
+            merged = self._merge_across_images(all_items, line_items)
+            dropped += len(line_items) - len(merged)
+            all_items.extend(merged)
+        if dropped:
+            # 앞 이미지와 겹친다고 본 줄을 뺐으면 소계의 품목이 온전하지 않다(1쪽과 2쪽에 같은 "양변기 300,000"이
+            # 있으면 2쪽 것이 빠진다). 그 상태로 검산하면 맞는 견적서에 계산 오류를 지적하게 되므로 소계 행을 뺀다
+            all_items = [item for item in all_items if not is_subtotal_row(item)]
 
         hits = [key for key in keys if key in cached]
         cache_log = {

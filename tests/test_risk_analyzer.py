@@ -156,3 +156,46 @@ def test_소계_행은_품목으로_세지_않는다():
 
 def test_소계_행이_없는_견적서는_검산하지_않는다():
     assert [i for i in _issues([_item("도배", "실크벽지", 2_295_000)]) if "소계" in i.title] == []
+
+
+# ── 코드 리뷰에서 나온 경우들 ──────────────────────────────────────────────
+
+
+def test_수량이_없는_파싱_결과에서도_단가와_금액으로_수량을_본다():
+    # 리스크 진단의 파싱은 수량을 내지 않는다. 금액 ÷ 단가가 24면 "수량 없는 한 줄"이 아니다
+    flooring = {"category": "바닥", "description": "강마루", "unit_price": 125_000, "amount": 3_000_000, "unit": "평"}
+    lump = {"category": "필름", "description": "방문 틀 창호 붙박이", "unit_price": 4_800_000, "amount": 4_800_000, "unit": "식"}
+    assert [i.process for i in _issues([flooring, lump]) if i.title == "세부 내역 없이 일괄 금액"] == ["필름"]
+
+
+def test_견적서_전체를_보고_낸_지적의_공종도_공종_목록에_들어간다():
+    # 욕실 타일은 "타일" 공종으로 읽히는데 방수 누락은 "욕실"에 붙는다. 목록에 없으면 화면 어디에도 나오지 않는다
+    issues, processes = RiskAnalyzer().analyze([_item("타일", "욕실 벽타일"), _item("타일", "욕실 바닥타일")])
+    assert [i.process for i in issues if i.type == "누락"] == ["욕실"]
+    assert "욕실" in processes and "타일" in processes
+
+
+def test_소계가_없는_구분의_품목이_옆_구분에_붙어도_계산_오류가_아니다():
+    # 소계가 품목들 뒤에 오는 양식: 목공에는 소계 행이 없고 도배에만 있다
+    trailing = [_item("목공", "몰딩", 500_000), _item("목공", "걸레받이", 500_000), _item("도배", "실크벽지", 900_000), _subtotal("도배", 900_000)]
+    # 소계가 품목들 앞에 오는 양식: 도배의 소계 뒤에 소계 없는 목공 품목이 이어진다
+    leading = [_subtotal("도배", 900_000), _item("도배", "실크벽지", 900_000), _item("목공", "몰딩", 500_000)]
+    assert [i for i in _issues(trailing) + _issues(leading) if "소계" in i.title] == []
+
+
+def test_할인처럼_금액이_음수인_줄도_소계의_합에_넣는다():
+    items = [_item("도배", "실크벽지", 900_000), _item("도배", "단수 할인", -50_000), _subtotal("도배", 850_000)]
+    assert [i for i in _issues(items) if "소계" in i.title] == []
+
+
+def test_무상이거나_고객이_따로_사는_줄은_총액에서_빠진_비용이_아니다():
+    free = {"category": "공과잡비", "description": "실리콘 마감 (서비스)", "amount": 0, "unit_price": 0}
+    own = {"category": "전기", "description": "실링팬 고객님구매", "amount": 0, "unit_price": 0}
+    extra = {"category": "공과잡비", "description": "승강기 이용료 별도", "amount": 0, "unit_price": 0}
+    assert [i.detail for i in _issues([free, own, extra], "불분명")] == [
+        "'승강기 이용료 별도' 항목은 금액이 적혀 있지 않아 견적 총액에 들어 있지 않습니다."]
+
+
+def test_금액이_숫자가_아닌_줄이_있어도_소계_검산이_죽지_않는다():
+    items = [_subtotal("도배", 900_000), _item("도배", "실크벽지", 900_000), {"category": "도배", "description": "풀", "amount": "<UNKNOWN>"}]
+    assert [i for i in _issues(items) if "소계" in i.title] == []

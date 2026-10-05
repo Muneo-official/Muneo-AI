@@ -33,8 +33,8 @@ class ResponseFormatter:
     def _build_process_groups(self, line_items: list[dict[str, Any]], issues: list[RiskIssue], requested_processes: list[str]) -> list[dict[str, Any]]:
         grouped_items = defaultdict(list)
         for item in line_items:
-            if is_subtotal_row(item):
-                continue  # 소계 행은 검산에만 쓴다. 품목 카드로 보여 주지 않는다
+            if is_subtotal_row(item) or not item.get("amount"):
+                continue  # 소계 행은 검산에만 쓰고, 금액이 없는 줄은 "정상 0원"이 아니라 지적으로만 보여 준다
             process = self._process_from_category(item.get("category", ""))
             if process:
                 grouped_items[process].append(item)

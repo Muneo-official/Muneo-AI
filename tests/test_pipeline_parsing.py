@@ -141,3 +141,12 @@ def test_금액_없는_행이_겹친_구간에서_두_번_읽혀도_한_번만_�
 
     row = {"code": "1516", "category": "공과잡비", "description": "승강기 이용료 별도", "amount": 0, "unit_price": 0}
     assert len(merge_chunk_results([_chunk([row]), _chunk([dict(row)])], for_risk=True)["line_items"]) == 1
+
+
+def test_코드가_없는_행은_공종이_다르면_같은_금액이어도_합치지_않는다():
+    # 목공의 "인건비 300,000"과 타일의 "인건비 300,000"은 다른 줄이다. 합치면 뒤쪽 공종의 금액이 사라진다
+    from pipeline.parsing import merge_chunk_results
+
+    items = [{"category": "목공", "description": "인건비", "amount": 300_000, "unit_price": 300_000},
+             {"category": "타일", "description": "인건비", "amount": 300_000, "unit_price": 300_000}]
+    assert [i["category"] for i in merge_chunk_results([_chunk(items)])["line_items"]] == ["목공", "타일"]

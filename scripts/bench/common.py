@@ -22,7 +22,7 @@ from pipeline.image_prep import (
     prepare_chunks_from_bytes,
     split_vertically,
 )
-from pipeline.parsing import _safe_int
+from pipeline.parsing import _safe_int, is_subtotal_row
 
 BENCH_DIR = pathlib.Path("logs/bench")  # logs/는 gitignore — 크롤링 데이터 경로·파싱 결과가 섞여서
 DEFAULT_CASES_FILE = BENCH_DIR / "cases.json"
@@ -245,10 +245,11 @@ def assign_chunk_indices(calls: list[dict], digests: dict[str, list[tuple[int, i
 def parse_metrics(line_items: list[dict], vision_calls: list[dict]) -> dict:
     """정확도 비교 지표 — 항목 수, 전체·공종별 금액 합계, total_cost.
 
-    공종별 금액은 품목의 category별로 금액을 더한다.
+    공종별 금액은 품목의 category별로 금액을 더한다. 리스크 진단의 파싱이 함께 내는 소계 행은 뺀다(두 번 더해진다).
     total_cost는 병합 로직(merge_chunk_results)처럼 이미지마다 청크 중 최댓값을 잡아 이미지끼리 더한다.
     """
     by_category: dict[str, int] = defaultdict(int)
+    line_items = [item for item in line_items if not is_subtotal_row(item)]
     for item in line_items:
         if item.get("category") and item.get("amount"):
             by_category[item["category"]] += _safe_int(item["amount"])
