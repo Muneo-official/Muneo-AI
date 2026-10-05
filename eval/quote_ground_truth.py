@@ -10,6 +10,7 @@ eval/quote_ground_truth.py — 가견적 벤치마크 정답셋(실제 견적서
     python -m eval.quote_ground_truth draft --pilot    # 개선용(dev) 후보 중 앞 5건 초안 + 검수 시트
     python -m eval.quote_ground_truth draft --all      # 선정된 후보 전부 초안
     python -m eval.quote_ground_truth draft --ids 887507   # 글 번호 지정 (탈락한 건을 예비 후보로 대체할 때)
+    python -m eval.quote_ground_truth draft --holdout  # 검증용(holdout) 세트 — 예비 후보에서 칸별 순서대로
     python -m eval.quote_ground_truth build            # quote 블록 → truth·input 재계산
     python -m eval.quote_ground_truth check            # 검산 2종 + 입력 스키마 검증
 
@@ -63,6 +64,18 @@ QUOTA: list[tuple[tuple[str, str | None, str | None], int]] = [
     (("수도권", "40평 이상", None), 2),
     (("수도권", None, "부분"), 5),
 ]
+
+# 검증용(holdout) 세트. 평가용을 연 뒤에 고친 엔진을 검증하려고, 엔진도 LLM도 본 적 없는 견적으로 따로 만든다.
+# 후보를 새로 뽑지 않고 이미 뽑아 둔 목록의 예비 후보를 칸별 순서대로 쓴다 — 순서는 sample의 seed로 정해져 있어
+# 잘 맞을 것 같은 견적을 고를 수 없다. 칸별 건수는 평가용과 같다(정원에서 개선용 1건을 뺀 수).
+HOLDOUT = "holdout"
+
+
+def _cell_label(cell: tuple[str, str | None, str | None]) -> str:
+    return "/".join(x or "전체범위" for x in cell)
+
+
+HOLDOUT_QUOTA: dict[str, int] = {_cell_label(cell): n - 1 for cell, n in QUOTA}
 
 # 초안용: 코퍼스의 정규화 카테고리 → (섹션 이름, 공종)
 CATEGORY_TO_SECTION = {
@@ -234,7 +247,7 @@ def sample(seed: int, force: bool) -> None:
             if scope is not None and _scope(공종들) != scope:
                 continue
             cell.append(c)
-        label = "/".join(x or "전체범위" for x in (region, band, scope))
+        label = _cell_label((region, band, scope))
         for i, c in enumerate(cell):
             picked_ids.add(c["article_id"])
             candidates.append({
@@ -343,19 +356,45 @@ def _save(records: list[dict]) -> None:
     GROUND_TRUTH_PATH.write_text(json.dumps(records, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def draft(pilot: bool, ids: list[str] | None) -> None:
+def holdout_targets(cands: list[dict], records: list[dict]) -> tuple[list[dict], dict[str, int]]:
+    """검증용 세트로 새로 초안을 만들 후보와, 예비 후보가 모자란 칸(칸 → 모자란 건수).
+
+    칸마다 정원에서 이미 있는 검증용 레코드(제외된 건은 빼고)를 뺀 만큼, 아직 레코드가 없는 예비 후보를 목록
+    순서대로 고른다. 검수에서 탈락한 건을 excluded로 바꾸고 다시 실행하면 그 칸의 다음 후보가 채워진다.
+    """
+    done = {r["source"]["article_id"] for r in records}
+    filled: dict[str, int] = defaultdict(int)
+    for r in records:
+        if r["split"] == HOLDOUT and r["status"] != "excluded":
+            filled[r["source"]["cell"]] += 1
+    targets, short = [], {}
+    for label, quota in HOLDOUT_QUOTA.items():
+        need = quota - filled[label]
+        free = [c for c in cands if c["cell"] == label and c["role"] == "reserve" and c["article_id"] not in done]
+        targets += [{**c, "split": HOLDOUT} for c in free[:max(need, 0)]]
+        if need > len(free):
+            short[label] = need - len(free)
+    return targets, short
+
+
+def draft(pilot: bool, ids: list[str] | None, holdout: bool = False) -> None:
     cands = json.loads(CANDIDATES_PATH.read_text(encoding="utf-8"))["candidates"]
     selected = [c for c in cands if c["role"] == "selected"]
+    records = _load()
     if ids:
-        targets = [c for c in cands if c["article_id"] in ids]
+        # --holdout과 함께 주면 그 글을 검증용으로 만든다 (예비 후보가 모자란 칸을 다른 칸의 후보로 채울 때)
+        targets = [{**c, "split": HOLDOUT} if holdout else c for c in cands if c["article_id"] in ids]
         for missing in sorted(set(ids) - {c["article_id"] for c in targets}):
             print(f"  [건너뜀] {missing}: 후보 목록에 없는 글 번호")
+    elif holdout:
+        targets, short = holdout_targets(cands, records)
+        for label, n in short.items():
+            print(f"  [부족] {label}: 예비 후보가 {n}건 모자람 — 다른 칸의 후보를 --holdout --ids로 지정")
     elif pilot:
         targets = [c for c in selected if c["split"] == "dev"][:5]
     else:
         targets = selected
 
-    records = _load()
     done = {r["source"]["article_id"] for r in records}
     col = _collection()
     REVIEW_DIR.mkdir(parents=True, exist_ok=True)
@@ -456,6 +495,7 @@ def main() -> None:
     p.add_argument("--pilot", action="store_true", help="개선용(dev) 후보 중 앞 5건만")
     p.add_argument("--all", action="store_true", help="선정된 후보 전부")
     p.add_argument("--ids", nargs="*", help="article_id 지정 (예비 후보 포함)")
+    p.add_argument("--holdout", action="store_true", help="검증용(holdout) 세트 — 예비 후보에서 칸별 순서대로")
     sub.add_parser("build")
     sub.add_parser("check")
     args = parser.parse_args()
@@ -463,9 +503,9 @@ def main() -> None:
     if args.cmd == "sample":
         sample(args.seed, args.force)
     elif args.cmd == "draft":
-        if not (args.pilot or args.all or args.ids):
-            parser.error("--pilot, --all, --ids 중 하나를 지정하세요")
-        draft(args.pilot, args.ids)
+        if not (args.pilot or args.all or args.ids or args.holdout):
+            parser.error("--pilot, --all, --ids, --holdout 중 하나를 지정하세요")
+        draft(args.pilot, args.ids, args.holdout)
     elif args.cmd == "build":
         build()
     else:

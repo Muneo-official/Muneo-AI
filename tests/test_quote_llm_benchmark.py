@@ -229,8 +229,9 @@ def test_호출_오류가_있는_모델은_채점하지_않는다(tmp_path, monk
 # ── 평가용 세트 잠금 ───────────────────────────────────────────────────────
 
 
-def test_평가용_세트는_final_없이_실행되지_않는다(monkeypatch):
-    monkeypatch.setattr("sys.argv", ["quote_llm_benchmark", "--split", "eval"])
+@pytest.mark.parametrize("split", ["eval", "holdout"])
+def test_평가용_검증용_세트는_final_없이_실행되지_않는다(monkeypatch, split):
+    monkeypatch.setattr("sys.argv", ["quote_llm_benchmark", "--split", split])
     monkeypatch.setattr(llm, "run", lambda *a: pytest.fail("실행되면 안 된다"))
 
     with pytest.raises(SystemExit):

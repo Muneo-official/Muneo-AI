@@ -7,7 +7,7 @@ eval/quote_ground_truth.py의 derive()·check_record() 단위테스트 — DB �
 
 import copy
 
-from eval.quote_ground_truth import _scope, check_record, derive
+from eval.quote_ground_truth import HOLDOUT_QUOTA, _scope, check_record, derive, holdout_targets
 
 _DOOR = {"창호공사": {"도어": 3_000_000}, "목공사": {"도어": 0}}
 
@@ -196,3 +196,49 @@ def test_도어_금액이_섹션_금액보다_크면_잡아낸다():
     derive(record)
 
     assert any("벗어남" in p for p in check_record(record))
+
+
+# ── 검증용(holdout) 세트 ───────────────────────────────────────────────────
+
+칸 = "서울/30평대/전체"
+
+
+def _cand(article_id: str, role: str = "reserve", cell: str = 칸) -> dict:
+    return {"article_id": article_id, "request_url": f"https://example.com/{article_id}", "cell": cell,
+            "region": "서울", "size_pyeong": 32, "split": "eval", "role": role}
+
+
+def _gt(article_id: str, split: str, status: str = "verified", cell: str = 칸) -> dict:
+    return {"split": split, "status": status, "source": {"article_id": article_id, "cell": cell}}
+
+
+def test_검증용_칸별_건수는_평가용과_같고_모두_20건이다():
+    assert sum(HOLDOUT_QUOTA.values()) == 20
+    assert HOLDOUT_QUOTA[칸] == 4
+
+
+def test_검증용은_예비_후보를_목록_순서대로_고르고_이미_쓴_건은_건너뛴다():
+    cands = [_cand("1", role="selected"), _cand("2"), _cand("3"), _cand("4"), _cand("5"), _cand("6"), _cand("7")]
+    records = [_gt("1", "eval"), _gt("2", "eval")]  # 2번은 평가용에서 탈락한 건을 대체하며 이미 썼다
+
+    targets, short = holdout_targets(cands, records)
+
+    assert [c["article_id"] for c in targets] == ["3", "4", "5", "6"]
+    assert all(c["split"] == "holdout" for c in targets)
+    assert 칸 not in short
+
+
+def test_검증용에서_탈락한_건은_같은_칸의_다음_후보로_채운다():
+    cands = [_cand(str(i)) for i in range(1, 8)]
+    records = [_gt("1", "holdout"), _gt("2", "holdout", status="excluded"), _gt("3", "holdout"), _gt("4", "holdout")]
+
+    targets, _ = holdout_targets(cands, records)
+
+    assert [c["article_id"] for c in targets] == ["5"]
+
+
+def test_검증용_예비_후보가_모자란_칸을_알린다():
+    targets, short = holdout_targets([_cand("1"), _cand("2")], [])
+
+    assert [c["article_id"] for c in targets] == ["1", "2"]
+    assert short[칸] == 2

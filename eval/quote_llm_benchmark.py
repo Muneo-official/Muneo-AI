@@ -5,6 +5,7 @@ eval/quote_llm_benchmark.py — 가견적 비교: 정답셋의 같은 입력을 
     python -m eval.quote_llm_benchmark --dry-run               # 프롬프트만 출력 (과금 없음)
     python -m eval.quote_llm_benchmark                         # 개선용(dev) 세트, 모델당 1회
     python -m eval.quote_llm_benchmark --split eval --final --repeats 3   # 평가용 세트 — 마지막 비교 때 한 번만
+    python -m eval.quote_llm_benchmark --split holdout --final --repeats 3   # 검증용 세트
     python -m eval.quote_llm_benchmark --variant narrow        # 범위를 엔진만큼 좁게 부르게 한 조건
 
 비교 조건
@@ -37,7 +38,7 @@ import sys
 from dotenv import load_dotenv
 
 from app.schemas.estimate import EstimateRequest
-from eval.quote_benchmark import TARGET_HIT_RATE, load_records, require_final, score_record, summarize
+from eval.quote_benchmark import SPLITS, TARGET_HIT_RATE, load_records, require_final, score_record, summarize
 from eval.quote_ground_truth import REVIEW_DIR
 
 load_dotenv()
@@ -364,8 +365,8 @@ def run(split: str, names: list[str], repeats: int, variant: str = "base") -> No
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--split", choices=["dev", "eval"], default="dev")
-    parser.add_argument("--final", action="store_true", help="평가용(eval) 세트 실행 확인 — 마지막 비교 때 한 번만")
+    parser.add_argument("--split", choices=SPLITS, default="dev")
+    parser.add_argument("--final", action="store_true", help="평가용(eval)·검증용(holdout) 세트 실행 확인 — 마지막 비교 때 한 번만")
     parser.add_argument("--models", nargs="+", choices=list(MODELS), default=list(MODELS))
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--variant", choices=list(PROMPT_VARIANTS), default="base", help="프롬프트 조건")
