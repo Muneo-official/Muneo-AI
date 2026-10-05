@@ -93,11 +93,12 @@ async def test_첫_단계는_평수_지역_공종_조건이다():
 
 async def test_전체_시공도_철거를_요청하지_않았으면_철거비_보정을_더한다():
     # 전체 시공 총액도 요청한 공종의 금액만 더한다. 철거를 요청하지 않았으면 그 합에 철거공사가 없다
+    # 철거여부가 "있음"이면 보정액 대신 참고 사례의 철거 금액을 쓴다(tests/test_full_scope_total.py)
     repo = _Repo([_case(i) for i in range(15)])
-    out = await _engine(repo).generate(_input(철거여부="있음"))
+    out = await _engine(repo).generate(_input(철거여부="모름"))
 
-    assert out["총_견적_범위"]["중간"] == int((30_000_000 + 25_000 * 30) * 1.03)
-    assert "철거비 보정 +750,000원" in out["보정_적용"]
+    assert out["총_견적_범위"]["중간"] == int((30_000_000 + 12_000 * 30) * 1.03)
+    assert "철거비 보정 +360,000원" in out["보정_적용"]
 
 
 async def test_전체_시공에서_철거를_요청하면_사례의_철거_금액을_쓰고_보정은_더하지_않는다():

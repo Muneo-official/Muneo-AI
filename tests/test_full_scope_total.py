@@ -115,8 +115,74 @@ async def test_공종별_보정은_총액에도_반영한다():
     assert out["총_견적_범위"]["중간"] == 기본_합 + 공과잡비 - int(4_000_000 * 0.65)  # 도배는 거실(35%)만
 
 
-async def test_요청_공종의_금액을_가진_사례가_없으면_사례의_총금액으로_낸다():
-    cases = [{"article_id": str(i), "region": "서울", "size_pyeong": 30, "total_cost": 50_000_000} for i in range(15)]
+async def test_공과잡비_금액이_있는_사례가_적으면_마감은_비율로_낸다():
+    # 15건 중 1건에만 공과잡비가 있고 그 금액이 크다. 한 건의 금액을 마감으로 쓰지 않는다
+    cases = [_case(i, cost_공과잡비=15_000_000 if i == 0 else 0) for i in range(15)]
     out = await _generate(cases, 기본_공종)
 
-    assert out["총_견적_범위"]["중간"] == 50_000_000
+    assert out["총_견적_범위"]["중간"] == int(기본_합 * 1.03)
+    assert "마감/공과잡비 포함 (총 공사비의 3%)" in out["보정_적용"]
+
+
+async def test_마감_비율이_0이면_사례의_공과잡비도_더하지_않는다():
+    engine = EstimateEngine(case_repository=_Repo([_case(i) for i in range(15)]), embedder=_Embedder(),
+                            reranker=None, coefficients={"finishing_ratio": 0})
+    out = await engine.generate(_input(기본_공종))
+
+    assert out["총_견적_범위"]["중간"] == 기본_합
+    assert "마감/공과잡비" not in out["공종별_단가_범위"]
+
+
+철거_뺀_공종 = [g for g in 기본_공종 if g != "철거"]
+
+
+async def test_철거비_보정과_양중비는_공종별_금액의_합에_더해진다():
+    out = await _generate([_case(i) for i in range(15)], 철거_뺀_공종, 철거여부="모름", 엘리베이터="없음", 층수=5)
+
+    공종_합 = sum(r["중간"] for r in out["공종별_단가_범위"].values())
+    assert out["총_견적_범위"]["중간"] == 공종_합 + 12_000 * 30 + 150_000 * 5
+
+
+async def test_철거가_있다고_한_전체_시공은_공종에_철거가_없어도_사례의_철거_금액을_더한다():
+    # 평당 보정액(30평 75만)이 아니라 참고 사례의 철거 금액(300만). 공종에 철거를 넣은 요청과 총액이 같다
+    cases = [_case(i) for i in range(15)]
+    out = await _generate(cases, 철거_뺀_공종, 철거여부="있음")
+
+    assert out["총_견적_범위"]["중간"] == (await _generate(cases, 기본_공종, 철거여부="있음"))["총_견적_범위"]["중간"]
+    assert "철거비 +3,000,000원 (참고 사례의 철거 금액)" in out["보정_적용"]
+    assert "철거" not in out["공종별_단가_범위"]
+
+
+async def test_철거_금액이_있는_사례가_적으면_평당_보정액을_쓴다():
+    cases = [_case(i, cost_철거=3_000_000 if i < 2 else 0) for i in range(15)]
+    out = await _generate(cases, 철거_뺀_공종, 철거여부="있음")
+
+    assert "철거비 보정 +750,000원" in out["보정_적용"]
+
+
+async def test_장판과_마루를_함께_골라도_바닥_금액은_총액에_한_번만_들어간다():
+    cases = [_case(i) for i in range(15)]
+    기준 = (await _generate(cases, 기본_공종))["총_견적_범위"]["중간"]
+    out = await _generate(cases, 기본_공종 + ["마루"])
+
+    assert out["총_견적_범위"]["중간"] == 기준
+    assert "장판·마루는 같은 바닥 금액이라 총액에 한 번만 포함" in out["보정_적용"]
+    assert (await _generate(cases, ["장판", "마루"], 시공범위="부분"))["총_견적_범위"]["중간"] == 5_000_000
+
+
+async def test_금액이_없는_요청_공종은_총액에_빠졌다고_알린다():
+    cases = [_case(i, cost_필름=0) for i in range(15)]
+    out = await _generate(cases, 기본_공종 + ["필름"])
+
+    assert out["데이터_부족_공종"] == ["필름"]
+    assert "필름 금액은 참고 사례에 없어 총액에 포함되지 않음" in out["보정_적용"]
+
+
+async def test_요청_공종의_금액을_가진_사례가_없으면_사례의_총금액으로_내고_범위는_전체_시공_마진을_쓴다():
+    cases = [{"article_id": str(i), "region": "서울", "size_pyeong": 30, "total_cost": 30_000_000 + i * 3_000_000}
+             for i in range(15)]
+    총 = (await _generate(cases, 기본_공종))["총_견적_범위"]
+
+    assert 총["중간"] == 51_000_000
+    assert 총["최소"] == int(51_000_000 * 0.96)
+    assert 총["최대"] == int(51_000_000 * 1.23)
