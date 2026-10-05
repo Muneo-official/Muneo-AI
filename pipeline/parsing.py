@@ -72,21 +72,30 @@ def _fix_column_swap(item: dict) -> dict:
 
 
 def _chunk_dedup_key(item: dict) -> tuple:
+    """청크가 겹친 구간에서 두 번 읽힌 같은 행을 가리는 열쇠.
+
+    공종(category)은 넣지 않는다. 같은 행이 청크마다 다른 공종으로 읽히는 일이 있어서(싱크볼이 한 청크에서는 가구,
+    다른 청크에서는 설비), 공종을 넣으면 그 행이 두 공종에 하나씩 남는다 — 공종 금액의 합이 총금액보다 커진다.
+    """
     code = item.get("code", "")
-    cat = item.get("category", "")
     amt = _safe_int(item.get("amount"))
     unit_p = _safe_int(item.get("unit_price"))
     desc_pre = item.get("description", "")[:4]
     if code:
-        return (code, cat, amt, unit_p)
-    return (cat, amt, unit_p, desc_pre)
+        return (code, amt, unit_p)
+    return (amt, unit_p, desc_pre)
 
 
 _AGGREGATE_KEYWORDS = {"합계", "소계", "총계", "공사비합계", "공사합계", "계", "합 계", "소 계"}
 
 
-def _remove_aggregate_items(line_items: list[dict], total_cost: int = 0) -> list[dict]:
-    """집계 행(소계·합계·카테고리 소계) 제거."""
+def is_subtotal_row(item: dict) -> bool:
+    """리스크 진단의 파싱이 품목과 함께 내는 소계 행인지(지시문이 description을 정확히 "소계"로 적게 한다)."""
+    return (item.get("description") or "").replace(" ", "") == "소계"
+
+
+def _remove_aggregate_items(line_items: list[dict], total_cost: int = 0, keep_subtotals: bool = False) -> list[dict]:
+    """집계 행(소계·합계·카테고리 소계) 제거. keep_subtotals면 "소계" 행은 남긴다(리스크 진단의 검산용)."""
     cleaned = []
     for item in line_items:
         desc = (item.get("description") or "").strip()
@@ -94,6 +103,9 @@ def _remove_aggregate_items(line_items: list[dict], total_cost: int = 0) -> list
         desc_norm = desc.replace(" ", "")
         cat_norm = cat.replace(" ", "")
 
+        if keep_subtotals and is_subtotal_row(item):
+            cleaned.append(item)
+            continue
         if desc_norm in _AGGREGATE_KEYWORDS or any(kw in desc_norm for kw in {"합계", "소계", "총계"}):
             continue
         if cat_norm and desc_norm and desc_norm == cat_norm:
@@ -102,7 +114,7 @@ def _remove_aggregate_items(line_items: list[dict], total_cost: int = 0) -> list
             continue
         cleaned.append(item)
 
-    if total_cost > 0:
+    if total_cost > 0 and not keep_subtotals:
         line_sum = sum(item.get("amount") or 0 for item in cleaned)
         if line_sum > total_cost * 1.2:
             cleaned = _remove_category_subtotals(cleaned)
@@ -161,13 +173,16 @@ def _calc_consistency(r: dict) -> float:
     return abs(line_sum - total) / total
 
 
-def merge_chunk_results(chunk_results: list[dict]) -> dict:
+def merge_chunk_results(chunk_results: list[dict], for_risk: bool = False) -> dict:
     """세로로 길어 여러 청크로 쪼개 파싱한 **같은 이미지**의 결과를 하나로 합친다.
 
     merge_parsed_results()는 서로 다른 이미지(페이지)를 합치는 함수라 총금액이 다르면
     "독립된 견적서가 섞였다"고 판단해 하나만 골라버린다 — 청크는 애초에 같은 이미지의
-    일부라 그 판단이 적용되면 안 된다. 대신 청크마다 나온 (category, amount, unit_price)
+    일부라 그 판단이 적용되면 안 된다. 대신 청크마다 나온 (code, amount, unit_price)
     조합으로 중복만 제거하고, total_cost는 청크 중 가장 큰 값(합계 행이 찍힌 청크)을 쓴다.
+
+    for_risk: 리스크 진단용. 금액이 없는 행("별도", "협의")과 소계 행을 버리지 않는다 — 앞의 것은 총액에 들어가지
+    않은 비용이고, 뒤의 것은 소계 검산에 쓴다. 수집(코퍼스)에서는 둘 다 버린다.
     """
     seen = set()
     all_items = []
@@ -180,9 +195,9 @@ def merge_chunk_results(chunk_results: list[dict]) -> dict:
         if total > max_total:
             max_total = total
         for item in r.get("line_items", []):
-            if not item.get("amount"):
+            if not item.get("amount") and not (for_risk and (item.get("description") or "").strip()):
                 continue
-            key = _chunk_dedup_key(item)
+            key = _chunk_dedup_key(item) if item.get("amount") else ("금액 없음", item.get("code", ""), item.get("description", ""))
             if key not in seen:
                 seen.add(key)
                 all_items.append(item)
@@ -190,7 +205,7 @@ def merge_chunk_results(chunk_results: list[dict]) -> dict:
     if not all_items:
         return {"is_estimate": False}
     all_items = [_fix_column_swap(it) for it in all_items]
-    all_items = _remove_aggregate_items(all_items, max_total)
+    all_items = _remove_aggregate_items(all_items, max_total, keep_subtotals=for_risk)
     result = {"is_estimate": True, "total_cost": max_total, "line_items": all_items}
     return _add_consistency_warning(result)
 

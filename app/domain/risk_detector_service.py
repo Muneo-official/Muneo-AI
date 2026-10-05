@@ -3,7 +3,7 @@
 종합프로젝트/risk_detector/service.py를 이관하되, 자체 파서(risk_detector/parser.py)와
 청커(risk_detector/chunker.py) 대신 이미 검증된 pipeline 모듈(tool-use 파서, image_prep)을
 그대로 쓴다. 룰 기반 분석(RiskAnalyzer)과 고층 양중비 컨텍스트 규칙은 원본 그대로 유지하고,
-그 위에 코퍼스 기반 가격 이상 탐지(risk_price_checker)를 추가한다.
+그 위에 코퍼스 기반 가격 이상 탐지(unit_price_reference — 품목의 단가 비교)를 추가한다.
 
 Vision 파싱은 모든 이미지·청크를 동시에 호출한다. 처음엔 하나씩 기다려서 응답시간이 청크 수에
 비례했다(S3 5청크 약 196초, S4 8청크 약 265초 — docs/RISK_DETECTOR_PERF_COST_LOG.md 베이스라인).
@@ -20,12 +20,11 @@ from typing import Any
 from starlette.concurrency import run_in_threadpool
 
 from app.core.logging import log_event
-from app.domain.estimate_engine import EstimateEngine
 from app.domain.risk_analyzer import RiskAnalyzer
 from app.domain.risk_constants import SUPPORTED_SPACE_TYPES
 from app.domain.risk_formatter import ResponseFormatter
 from app.domain.risk_models import RiskIssue
-from app.domain.risk_price_checker import check_price_anomalies
+from app.domain.unit_price_reference import UnitPriceReference
 from app.repositories.risk_parse_cache_repository import CachedParse, RiskParseCacheRepository
 from app.schemas.risk import AnalyzeRiskCommand
 from pipeline.image_prep import prepare_chunks_from_bytes
@@ -72,12 +71,13 @@ def _combine_calls(first: VisionCallResult, retry: VisionCallResult) -> VisionCa
 class RiskDetectorService:
     def __init__(
         self,
-        engine: EstimateEngine,
         vision_max_concurrency: int = 20,
         vision_max_concurrency_per_request: int = 8,
         parse_cache: RiskParseCacheRepository | None = None,
+        unit_prices: UnitPriceReference | None = None,
     ) -> None:
-        self._engine = engine
+        # None이면 단가 지적을 하지 않는다 (기준표가 아직 없을 때)
+        self.unit_prices = unit_prices
         # None이면 캐시 없이 매번 Vision을 호출한다 (설정으로 끌 때, 벤치에서 반복 측정할 때)
         self._parse_cache = parse_cache
         self.analyzer = RiskAnalyzer()
@@ -103,7 +103,10 @@ class RiskDetectorService:
             rule_done_at = time.perf_counter()
             rule_analyze_s = rule_done_at - parsed_at
 
-            price_issues = await check_price_anomalies(command, all_items, self._engine)
+            price_issues = (
+                self.unit_prices.issues(all_items) + self.unit_prices.quantity_issues(all_items, command.pyeong)
+                if self.unit_prices else []
+            )
             price_check_s = time.perf_counter() - rule_done_at
             issues.extend(price_issues)
             for issue in price_issues:
@@ -263,7 +266,7 @@ class RiskDetectorService:
         for key, (_, chunks) in zip(to_parse, chunks_per_image):
             image_calls = list(calls[cursor : cursor + len(chunks)])
             cursor += len(chunks)
-            merged = merge_chunk_results([call.result for call in image_calls])
+            merged = merge_chunk_results([call.result for call in image_calls], for_risk=True)
             parsed[key] = (merged.get("line_items", []), image_calls)
         return parsed, list(calls)
 
@@ -310,23 +313,22 @@ class RiskDetectorService:
     def _merge_across_images(
         self, already_collected: list[dict[str, Any]], new_items: list[dict[str, Any]]
     ) -> list[dict[str, Any]]:
-        """여러 장의 이미지(같은 견적서의 여러 페이지)에서 나온 항목을 합치며 중복 제거.
+        """여러 장의 이미지(같은 견적서의 여러 페이지)에서 나온 항목을 합치며, 앞 이미지에 이미 있던 줄은 뺀다.
 
         pipeline.parsing.merge_chunk_results()는 한 이미지 내 청크 병합용이라 이미지 간
         병합엔 안 맞는다(원본 risk_detector/service.py의 자체 dedup 로직 그대로 이관).
+
+        같은 이미지 안에서 똑같은 줄이 두 번 나오면 둘 다 남긴다. 견적서에 같은 줄이 두 번 적힌 것이고, 그것이
+        중복 지적의 대상이다 — 예전에는 여기서 한 줄을 지워서 중복 규칙이 볼 때는 이미 한 줄뿐이었다.
         """
         seen = {
             (i.get("category", ""), i.get("description", ""), int(i.get("amount") or 0))
             for i in already_collected
         }
-        merged = []
-        for item in new_items:
-            key = (item.get("category", ""), item.get("description", ""), int(item.get("amount") or 0))
-            if key in seen:
-                continue
-            seen.add(key)
-            merged.append(item)
-        return merged
+        return [
+            item for item in new_items
+            if (item.get("category", ""), item.get("description", ""), int(item.get("amount") or 0)) not in seen
+        ]
 
     def _validate_input(self, command: AnalyzeRiskCommand) -> None:
         if command.space_type not in SUPPORTED_SPACE_TYPES:

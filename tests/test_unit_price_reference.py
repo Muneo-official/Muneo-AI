@@ -1,0 +1,153 @@
+"""
+단가 기준표와 단가 판정(리스크 진단의 가격 이상 탐지) 단위테스트.
+
+실제 사례: 공종의 합계를 비슷한 집의 합계와 비교하던 예전 방식은 실제 견적서 100건 중 74건에 가격 지적을 달았다.
+집마다 공사 범위가 달라 합계는 원래 2배씩 차이 난다. 품목의 단가는 집이 달라도 비슷해서(도배 인건비 하루 25~30만 원),
+단가를 비교하면 같은 표본에서 18건으로 줄고, 단가를 1.4배로 올린 견적서도 잡는다. 금액은 지어낸 값이다.
+"""
+
+from app.domain.unit_price_reference import (
+    MIN_REQUESTS,
+    UnitPriceReference,
+    build_quantity_reference,
+    build_reference,
+    item_key,
+    usable_unit_price,
+)
+
+
+def _item(category: str, description: str, unit_price: int, quantity: int = 2) -> dict:
+    return {"category": category, "description": description, "unit_price": unit_price, "amount": unit_price * quantity}
+
+
+def _case(i: int, items: list[dict], **more) -> dict:
+    return {"article_id": str(i), "request_url": f"https://example.com/{i}", "parsed_estimate": {"line_items": items}, **more}
+
+
+def _cases(n: int = 20) -> list[dict]:
+    # 의뢰마다 도배 인건비 25~30만 원, 실크벽지 평당 1.0~1.4만 원
+    return [_case(i, [_item("도배", "인건비", 250_000 + (i % 6) * 10_000), _item("도배", "실크벽지(LX 베스띠)", 10_000 + (i % 5) * 1_000),
+                      _item("도배", "부자재(풀, 부직포)", 200_000 + (i % 4) * 50_000)]) for i in range(n)]
+
+
+# ── 열쇠와 단가 ────────────────────────────────────────────────────────────
+
+
+def test_품명의_괄호_숫자_기호는_열쇠에서_뺀다():
+    a = item_key({"category": "도배", "description": "실크벽지(LX 베스띠, 개나리 로하스)"})
+    b = item_key({"category": "도배", "description": "실크 벽지 (LG,베스티) 2.5"})
+    assert a == b == ("도배", "실크벽지")
+
+
+def test_설비와_욕실은_같은_묶음이다():
+    # 수전공사의 부속은 견적서에 따라 욕실로도 설비로도 읽힌다
+    assert item_key({"category": "설비", "description": "샤워 수전"}) == item_key({"category": "욕실", "description": "샤워 수전"})
+
+
+def test_단가가_없거나_금액보다_큰_줄은_비교하지_않는다():
+    assert usable_unit_price({"unit_price": 300_000, "amount": 600_000}) == 300_000
+    assert usable_unit_price({"unit_price": 0, "amount": 600_000}) is None
+    assert usable_unit_price({"unit_price": 900_000, "amount": 600_000}) is None  # 열이 뒤바뀐 줄
+
+
+# ── 기준표 ────────────────────────────────────────────────────────────────
+
+
+def test_서로_다른_의뢰가_충분한_품목만_기준이_된다():
+    cases = _cases(MIN_REQUESTS) + [_case(100 + i, [_item("가구", "한샘 싱크대", 3_000_000, 1)]) for i in range(MIN_REQUESTS - 1)]
+    table = build_reference(cases)
+    assert ("도배", "인건비") in table and ("가구", "한샘싱크대") not in table
+
+
+def test_한_의뢰의_견적서_여러_장은_한_의뢰로_센다():
+    # 수정본이 여러 장 달린 의뢰 하나가 기준을 만들지 못한다
+    cases = [{**_case(i, [_item("목공", "특이한 품목", 100_000)]), "request_url": "https://example.com/same"} for i in range(40)]
+    assert build_reference(cases) == {}
+
+
+def test_비주거_견적서와_채점하는_의뢰는_기준에서_뺀다():
+    cases = _cases(MIN_REQUESTS)
+    assert build_reference(cases[:-1] + [{**cases[-1], "is_non_residential": True}]) == {}
+    assert build_reference(cases, exclude_request="https://example.com/0") == {}
+    assert ("도배", "인건비") in build_reference(cases)
+
+
+def test_기준은_단가의_하위_10퍼센트_중간_상위_10퍼센트다():
+    stats = build_reference(_cases(20))[("도배", "인건비")]
+    assert (stats["n"], stats["p10"], stats["median"], stats["p90"]) == (20, 250_000, 270_000, 300_000)
+
+
+# ── 판정 ──────────────────────────────────────────────────────────────────
+
+
+def _reference() -> UnitPriceReference:
+    return UnitPriceReference(build_reference(_cases(20)))
+
+
+def test_범위를_넘고_중간값의_배수도_넘어야_높음이다():
+    ref = _reference()
+    assert ref.judge(_item("도배", "인건비", 560_000))[0] == "높음"
+    assert ref.judge(_item("도배", "인건비", 310_000))[0] is None  # 상위 10%는 넘었지만 중간값의 1.3배 안
+    assert ref.judge(_item("도배", "인건비", 120_000))[0] == "낮음"
+    assert ref.judge(_item("도배", "처음 보는 품목", 560_000)) is None
+
+
+def test_한_공종에서_비교한_줄의_절반_이상이_높으면_그_공종을_지적한다():
+    items = [_item("도배", "인건비", 560_000), _item("도배", "실크벽지(LX)", 24_000), _item("도배", "부자재(풀)", 250_000)]
+    issues = _reference().issues(items)
+    assert [(i.process, i.title) for i in issues] == [("도배", "도배 단가가 시세보다 높음")]
+    assert "3개 품목 중 2개" in issues[0].detail and "560,000원" in issues[0].detail
+
+
+def test_한_줄만_벗어나면_지적하지_않는다():
+    # 자재 한 줄이 비싼 것은 등급 차이일 수 있다. 공종 전체가 한쪽으로 쏠릴 때만 말한다
+    items = [_item("도배", "인건비", 280_000), _item("도배", "실크벽지(수입)", 24_000), _item("도배", "부자재(풀)", 250_000)]
+    assert _reference().issues(items) == []
+
+
+def test_비교할_줄이_하나뿐인_공종은_지적하지_않는다():
+    assert _reference().issues([_item("도배", "인건비", 900_000)]) == []
+
+
+def test_단가가_낮은_쪽도_지적한다():
+    items = [_item("도배", "인건비", 110_000), _item("도배", "실크벽지", 4_000)]
+    assert [i.title for i in _reference().issues(items)] == ["도배 단가가 시세보다 낮음"]
+
+
+# ── 수량 ──────────────────────────────────────────────────────────────────
+
+
+def _measured(category: str, description: str, unit_price: int, quantity: float, unit: str) -> dict:
+    return {"category": category, "description": description, "unit_price": unit_price, "amount": round(unit_price * quantity), "unit": unit}
+
+
+def _quantity_cases(n: int = 20) -> list[dict]:
+    # 30평 집에 실크벽지 85~104평(평당 2.8~3.5), 인건비 5 M/D
+    return [{**_case(i, [_measured("도배", "실크벽지(LX)", 11_000, 85 + i, "평"), _measured("도배", "인건비", 280_000, 5, "M/D")]),
+             "size_pyeong": 30} for i in range(n)]
+
+
+def test_평당_수량_기준은_집_크기에_비례하는_단위의_품목만_만든다():
+    table = build_quantity_reference(_quantity_cases())
+    assert list(table) == [("도배", "실크벽지", "평")]  # M/D는 집 크기와 따로 논다
+    assert table[("도배", "실크벽지", "평")]["median"] == 3.15
+
+
+def test_단위_표기가_달라도_같은_단위로_본다():
+    cases = [{**_case(i, [_measured("바닥", "강마루", 35_000, 80 + i, "㎡" if i % 2 else "M2")]), "size_pyeong": 30} for i in range(20)]
+    assert list(build_quantity_reference(cases)) == [("바닥", "강마루", "m2")]
+
+
+def test_평수에_비해_수량이_지나치게_많으면_지적한다():
+    ref = UnitPriceReference({}, build_quantity_reference(_quantity_cases()))
+    padded = _measured("도배", "실크벽지(LX 베스띠)", 11_000, 250, "평")  # 30평 집에 250평
+    issues = ref.quantity_issues([padded], pyeong=30)
+    assert [(i.process, i.title) for i in issues] == [("도배", "수량이 평수에 비해 많음")]
+    assert "250평" in issues[0].detail
+
+
+def test_수량이_많은_정상_견적서와_단위가_다른_줄은_지적하지_않는다():
+    ref = UnitPriceReference({}, build_quantity_reference(_quantity_cases()))
+    assert ref.quantity_issues([_measured("도배", "실크벽지", 11_000, 120, "평")], pyeong=30) == []    # 상위 10%의 1.5배 안
+    assert ref.quantity_issues([_measured("도배", "실크벽지", 3_400, 400, "m2")], pyeong=30) == []     # ㎡ 기준이 없다
+    assert ref.quantity_issues([_measured("도배", "실크벽지", 11_000, 250, "평")], pyeong=0) == []

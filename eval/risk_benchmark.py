@@ -13,14 +13,13 @@ eval/risk_benchmark.py — 리스크 진단 채점: 결함을 심은 견적서�
   - 깨끗한 판의 지적 수: 결함을 심지 않은 견적서에 지적한 수. 원본의 실제 문제도 섞여 있어 오탐 수는 아니다
 
 Vision 파싱은 과금이다. 이미지의 파싱 결과를 파일에 저장해 두고 다시 부르지 않으므로, 판정 규칙만 고친 뒤에는
-다시 돌려도 비용이 들지 않는다. 가격 비교의 참고 사례에서는 채점하는 견적서와 같은 의뢰의 사례를 뺀다.
+다시 돌려도 비용이 들지 않는다. 단가 기준표는 채점하는 견적서와 같은 의뢰의 견적서를 빼고 만든다.
 """
 
 import argparse
 import asyncio
 import datetime
 import json
-import re
 import sys
 from collections import Counter
 
@@ -65,7 +64,6 @@ def trades_of(section: str) -> set[str]:
 
 # ── 지적 목록 ─────────────────────────────────────────────────────────────
 
-_PRICE_RE = re.compile(r"견적 금액 ([\d,]+)원.*?\(([\d,]+)~([\d,]+)원")
 
 
 def muneo_findings(report: dict) -> list[dict]:
@@ -76,13 +74,14 @@ def muneo_findings(report: dict) -> list[dict]:
             if item["status"] == "정상":
                 continue
             kind, trade, direction = item["status"], section["process"], None
-            if "시세 범위" in item["title"]:
-                # 화면에는 "불분명"으로 나가지만 가격 지적이다. 방향은 견적 금액이 범위의 어느 쪽에 있는지로 정한다
+            if "시세" in item["title"]:
+                # 화면에는 "불분명"으로 나가지만 가격 지적이다. 방향은 제목에 적혀 있다
                 kind = "가격"
-                m = _PRICE_RE.search(item["description"])
-                if m:
-                    amount, lo, hi = (int(g.replace(",", "")) for g in m.groups())
-                    direction = "과다" if amount > hi else "과소" if amount < lo else None
+                direction = "과다" if "높" in item["title"] else "과소" if "낮" in item["title"] else None
+            elif "수량이" in item["title"]:
+                kind, direction = "수량", "과다"
+            elif "소계" in item["title"]:
+                kind = "계산"  # 화면에는 "불분명"으로 나가지만 계산 오류 지적이다
             elif trade == COMMON:
                 # 공종 없이 나오는 지적은 고층 양중·운반 비용뿐이다. 품명에 "운반"이 든 줄의 중복·불분명 지적과 섞이지
                 # 않게, 글에 든 낱말이 아니라 공종으로 가린다
@@ -213,17 +212,23 @@ def region_text(info: dict) -> str:
 
 
 async def run(split: str) -> None:
-    from app.domain.estimate_engine import ENGINE_VERSION
+    from motor.motor_asyncio import AsyncIOMotorClient
+
+    from app.core.config import get_settings
     from app.domain.risk_detector_service import RiskDetectorService
+    from app.domain.unit_price_reference import UnitPriceReference, build_quantity_reference, build_reference
     from app.schemas.risk import AnalyzeRiskCommand
-    from eval.quote_benchmark import build_engine
     from pipeline.vision_client import RISK_MODEL
 
     records = load_records(split)
-    client, settings, repo, engine, coefficients = await build_engine()
+    settings = get_settings()
+    client = AsyncIOMotorClient(settings.mongo_uri)
+    cases = [doc async for doc in client[settings.mongo_db_name]["estimate_cases"].find(
+        {}, {"parsed_estimate.line_items": 1, "request_url": 1, "article_id": 1, "is_non_residential": 1, "size_pyeong": 1})]
+    client.close()
     RISK_DIR.mkdir(parents=True, exist_ok=True)
-    service = RiskDetectorService(engine, settings.risk_vision_max_concurrency,
-                                  settings.risk_vision_max_concurrency_per_request, parse_cache=LocalParseCache())
+    service = RiskDetectorService(settings.risk_vision_max_concurrency, settings.risk_vision_max_concurrency_per_request,
+                                  parse_cache=LocalParseCache())
 
     async def analyze(doc: dict, path) -> list[dict]:
         info = doc["info"]
@@ -234,22 +239,22 @@ async def run(split: str) -> None:
 
     rows, details = [], []
     for record in records:
-        # 가격 비교의 참고 사례에서 이 견적서와 같은 의뢰의 사례를 뺀다. 두 판은 같은 의뢰라 함께 돌려도 된다
-        await repo.leave_out(record["source"].get("request_url"), record["source"].get("article_id"))
+        # 단가 기준표를 이 견적서와 같은 의뢰의 견적서 없이 만든다 — 자기 자신의 단가와 비교되지 않게.
+        # 두 판은 같은 의뢰라 함께 돌려도 된다
+        source = record["source"]
+        request = str(source.get("request_url") or source.get("article_id"))
+        service.unit_prices = UnitPriceReference(build_reference(cases, request), build_quantity_reference(cases, request))
         clean_path, planted_path = image_paths(record["id"])
         clean, planted = await asyncio.gather(analyze(record, clean_path), analyze(record["planted_doc"], planted_path))
         row = {"id": record["id"], **score_record(record["planted"], clean, planted)}
         rows.append(row)
         details.append({**row, "clean": clean, "planted": planted})
-    client.close()
-
     summary = summarize(rows)
     RUNS_DIR.mkdir(parents=True, exist_ok=True)
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     path = RUNS_DIR / f"{split}_{stamp}.json"
     path.write_text(json.dumps({
-        "split": split, "run_at": stamp, "engine_version": ENGINE_VERSION, "risk_model": RISK_MODEL,
-        "coefficient_version": coefficients.get("version", "default"), "use_reranker": settings.use_reranker,
+        "split": split, "run_at": stamp, "risk_model": RISK_MODEL, "reference_cases": len(cases),
         "summary": summary, "records": details,
     }, ensure_ascii=False, indent=2), encoding="utf-8")
     print_report(rows, summary)

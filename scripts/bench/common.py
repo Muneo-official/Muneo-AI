@@ -245,7 +245,7 @@ def assign_chunk_indices(calls: list[dict], digests: dict[str, list[tuple[int, i
 def parse_metrics(line_items: list[dict], vision_calls: list[dict]) -> dict:
     """정확도 비교 지표 — 항목 수, 전체·공종별 금액 합계, total_cost.
 
-    공종별 금액은 가격 체크(risk_price_checker._sum_amount_by_category)의 입력과 같은 방식으로 합산한다.
+    공종별 금액은 품목의 category별로 금액을 더한다.
     total_cost는 병합 로직(merge_chunk_results)처럼 이미지마다 청크 중 최댓값을 잡아 이미지끼리 더한다.
     """
     by_category: dict[str, int] = defaultdict(int)
