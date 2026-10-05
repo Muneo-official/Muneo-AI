@@ -8,6 +8,10 @@
 그래서 줄마다 단가를 같은 품목의 단가 범위와 비교하고, 한 공종에서 비교한 줄의 절반 이상이 같은 방향으로 벗어날
 때만 그 공종을 지적한다. 같은 표본에서 견적서당 0.2개, 100건 중 18건으로 줄었다.
 
+같은 이름의 품목도 단위가 다르면 다른 값이다. 도배 부자재는 "식"으로 적으면 12~40만 원, "㎡"로 적으면 1,500원이다.
+단위를 가리지 않고 묶었을 때는 이 둘이 한 범위(1,500~400,000원)가 되어, 실제 견적서의 단가 지적 넷 중 하나가 그
+범위 때문에 생긴 것이었다. 그래서 단위까지 같은 줄끼리만 비교한다.
+
 기준표는 estimate_cases의 품목에서 만든다(scripts/build_unit_price_reference.py). 이 모듈은 DB를 모른다.
 """
 
@@ -25,10 +29,18 @@ LOW_RATIO = 0.7         # 하위 10%보다 낮고, 중간값의 이 배수보다
 MIN_COMPARED_LINES = 2  # 한 공종에서 단가를 비교한 줄이 이보다 적으면 지적하지 않는다. 한 줄로는 그 공종을 말할 수 없다
 MIN_SHARE = 0.5         # 비교한 줄 중 이 비율 이상이 같은 방향으로 벗어나야 지적한다
 MAX_EXAMPLES = 2
+MAX_SPREAD = 5          # 상위 10%가 하위 10%의 이 배수 이상인 품목은 기준으로 쓰지 않는다. 범위가 이만큼 넓으면 "보통 얼마"를 말할 수 없다
 # 수량 비교: 평수에 비례하는 단위로 적힌 품목만 본다. "식"·"개"·"M/D"는 집 크기와 따로 논다
 MEASURED_UNITS = {"평", "m2", "자", "m"}
 QUANTITY_RATIO = 1.5    # 평당 수량이 같은 품목의 상위 10%의 이 배수를 넘으면 "수량이 많음"
-_UNIT_ALIASES = {"㎡": "m2", "m²": "m2", "제곱미터": "m2", "py": "평", "pyeong": "평"}
+DOMINANT_UNIT_SHARE = 0.8  # 단위가 안 적힌 줄은, 그 품목의 줄 대부분이 한 단위로 적혀 있을 때만 그 단위의 기준과 비교한다
+_UNIT_ALIASES = {
+    "㎡": "m2", "m²": "m2", "제곱미터": "m2", "py": "평", "pyeong": "평", "미터": "m",
+    "ea": "개", "세트": "set", "셋트": "set", "박스": "box",
+    "m/d": "인", "명": "인", "품": "인",  # 하루 한 사람의 품
+}
+# 코퍼스에는 견적서의 구분 이름이 그대로 남은 줄이 있다("도배공사", "조명공사"). "공사"를 떼고 아래 이름으로 맞춘다
+_CATEGORY_ALIASES = {"목": "목공", "조명": "전기", "수전": "설비", "도기": "욕실", "도기,수전": "욕실", "도기/수전": "욕실", "시트": "필름"}
 
 # 같은 품목이 견적서에 따라 어느 쪽으로도 읽히는 공종은 한 묶음으로 본다(수전공사의 부속은 욕실과 설비에 반반)
 _BUCKET = {"설비": "욕실"}
@@ -36,8 +48,8 @@ _PAREN_RE = re.compile(r"\(.*?\)|\[.*?\]")
 _NOISE_RE = re.compile(r"[\d.,*×xX/\s:+\-~]+")
 KEY_LENGTH = 12
 
-Key = tuple[str, str]
-QuantityKey = tuple[str, str, str]  # (공종 묶음, 품명, 단위)
+Key = tuple[str, str, str]  # (공종 묶음, 품명, 단위)
+QuantityKey = Key
 
 
 def _to_int(value: Any) -> int:
@@ -53,18 +65,20 @@ def _category_of(item: dict[str, Any]) -> str:
 
 
 def bucket(category: str) -> str:
-    return _BUCKET.get(category, category)
+    name = category.strip()
+    name = name[:-2] if name.endswith("공사") else name
+    name = _CATEGORY_ALIASES.get(name, name)
+    return _BUCKET.get(name, name)
 
 
 def item_key(item: dict[str, Any]) -> Key | None:
-    """품목을 묶는 열쇠 (공종 묶음, 품명에서 괄호·숫자·기호를 뺀 앞 글자).
+    """품목을 묶는 열쇠 (공종 묶음, 품명에서 괄호·숫자·기호를 뺀 앞 글자, 단위).
 
-    "실크벽지(LX 베스띠, 개나리 로하스)"와 "실크벽지(LG,베스티)"는 같은 품목이다. 단위는 넣지 않는다 — 리스크 진단의
-    파싱은 단위를 내지 않는다.
+    "실크벽지(LX 베스띠, 개나리 로하스)"와 "실크벽지(LG,베스티)"는 같은 품목이다. 단위가 안 적힌 줄의 단위는 ""다.
     """
     name = _NOISE_RE.sub("", _PAREN_RE.sub("", str(item.get("description") or "")))[:KEY_LENGTH]
-    category = str(item.get("category") or "")
-    return (bucket(category), name) if category and name else None
+    category = bucket(str(item.get("category") or ""))
+    return (category, name, normalize_unit(item.get("unit"))) if category and name else None
 
 
 def normalize_unit(unit: Any) -> str:
@@ -79,8 +93,8 @@ def quantity_of(item: dict[str, Any]) -> float | None:
 
 
 def quantity_key(item: dict[str, Any]) -> QuantityKey | None:
-    key, unit = item_key(item), normalize_unit(item.get("unit"))
-    return (*key, unit) if key and unit in MEASURED_UNITS else None
+    key = item_key(item)
+    return key if key and key[2] in MEASURED_UNITS else None
 
 
 def usable_unit_price(item: dict[str, Any]) -> int | None:
@@ -91,6 +105,9 @@ def usable_unit_price(item: dict[str, Any]) -> int | None:
 
 def build_reference(cases: list[dict[str, Any]], exclude_request: str | None = None) -> dict[Key, dict[str, int]]:
     """견적서들의 품목에서 단가 기준표를 만든다. 반환: 열쇠 → {n, p10, median, p90}.
+
+    단위가 안 적힌 줄은 기준에 넣지 않는다. 대신 한 품목의 줄 대부분(DOMINANT_UNIT_SHARE)이 한 단위로 적혀 있으면
+    그 단위의 기준을 단위 ""의 열쇠로도 넣어, 단위 칸이 없는 견적서의 줄을 그 기준과 비교할 수 있게 한다.
 
     exclude_request: 이 의뢰(request_url, 없으면 article_id)의 견적서는 뺀다. 채점할 때 견적서가 자기 자신의 단가와
     비교되지 않게 하는 데 쓴다.
@@ -104,15 +121,23 @@ def build_reference(cases: list[dict[str, Any]], exclude_request: str | None = N
             continue
         for item in (case.get("parsed_estimate") or {}).get("line_items") or []:
             key, unit_price = item_key(item), usable_unit_price(item)
-            if key and unit_price:
+            if key and key[2] and unit_price:
                 prices[key].append((request, unit_price))
     reference = {}
+    lines: dict[tuple[str, str], dict[str, int]] = defaultdict(dict)
     for key, rows in prices.items():
+        lines[key[:2]][key[2]] = len(rows)
         if len({request for request, _ in rows}) < MIN_REQUESTS:
             continue
         values = sorted(price for _, price in rows)
         n = len(values)
+        if values[-(n // 10) - 1] >= values[n // 10] * MAX_SPREAD:
+            continue
         reference[key] = {"n": n, "p10": values[n // 10], "median": int(statistics.median(values)), "p90": values[-(n // 10) - 1]}
+    for (category, name), by_unit in lines.items():
+        unit = max(by_unit, key=by_unit.get)
+        if (category, name, unit) in reference and by_unit[unit] / sum(by_unit.values()) >= DOMINANT_UNIT_SHARE:
+            reference[(category, name, "")] = reference[(category, name, unit)]
     return reference
 
 
