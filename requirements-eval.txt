@@ -1,0 +1,4 @@
+# 평가 스크립트에만 쓰는 패키지 — 서비스(requirements.txt)에는 필요 없다.
+# eval/quote_llm_benchmark.py가 가견적을 범용 LLM과 비교할 때 부른다.
+openai==3.24.0
+google-genai==2.28.0
