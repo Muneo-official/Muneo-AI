@@ -160,10 +160,6 @@ class EstimateResponse(BaseModel):
     estimate_token: str
 
 
-class EstimateError(BaseModel):
-    error: str
-
-
 class SaveEstimateRequest(BaseModel):
     """generate() 응답에 담긴 estimate_token으로 저장을 요청한다.
 

@@ -9,8 +9,6 @@ pipeline/reference/parse_estimates.py의 순수 로직(이미지 다운로드·�
 문제가 생기자마자 드러나게 한다.
 """
 
-import json
-import re
 from collections import defaultdict
 from dataclasses import asdict
 
@@ -25,18 +23,6 @@ def _safe_int(value, default: int = 0) -> int:
         return int(value or default)
     except (TypeError, ValueError):
         return default
-
-
-def _parse_raw(text: str) -> dict:
-    """API 응답 텍스트에서 JSON 객체 추출."""
-    raw = text.strip()
-    raw = re.sub(r"^```(?:json)?\s*", "", raw)
-    raw = re.sub(r"\s*```$", "", raw)
-    start = raw.find("{")
-    if start == -1:
-        raise json.JSONDecodeError("JSON 객체를 찾을 수 없음", raw, 0)
-    obj, _ = json.JSONDecoder().raw_decode(raw, start)
-    return obj
 
 
 def _fix_column_swap(item: dict) -> dict:
