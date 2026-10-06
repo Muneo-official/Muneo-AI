@@ -142,7 +142,3 @@ def test_평가용_세트는_final_없이_실행되지_않는다(monkeypatch):
     monkeypatch.setattr(rb, "run", lambda *a: pytest.fail("실행되면 안 된다"))
     with pytest.raises(SystemExit):
         rb.main()
-
-
-def test_수도권은_지역_이름이_아니라서_경기로_넘긴다():
-    assert rb.region_text({"지역": "수도권"}) == "경기" and rb.region_text({"지역": "서울"}) == "서울"

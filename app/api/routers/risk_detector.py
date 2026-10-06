@@ -3,8 +3,10 @@ from typing import Annotated
 from fastapi import APIRouter, Body, Depends, File, Form, Header, HTTPException, Request, UploadFile
 
 from app.core.deps import get_risk_detector_service, get_risk_report_repository
+from app.core.logging import log_event
 from app.core.rate_limit import _global_key, limiter
 from app.domain.risk_detector_service import RiskDetectorService
+from app.domain.risk_input_guard import InputRejected, check_upload_count, check_upload_size
 from app.repositories.risk_report_repository import RiskReportRepository
 from app.schemas.risk import AnalyzeRiskCommand, AnalyzeRiskResponse
 
@@ -34,16 +36,21 @@ async def analyze_risk(
     request: Request,
     service: Annotated[RiskDetectorService, Depends(get_risk_detector_service)],
     space_type: str = Form(..., description="아파트|빌라|오피스텔|단독주택"),
-    pyeong: int = Form(..., description="면적(평)"),
-    room_count: int = Form(..., description="방 개수"),
-    floor: int = Form(..., description="층수"),
+    pyeong: int = Form(..., description="면적(평) 5~150"),
+    room_count: int = Form(..., description="방 개수 1~10"),
+    floor: int = Form(..., description="층수 -2~70 (지하는 음수, 0 제외)"),
     elevator: bool = Form(..., description="엘리베이터 유무 (true/false)"),
-    region: str = Form(..., description="지역"),
-    building_age: str = Form(..., description="건물 연식"),
-    company_name: str = Form(..., description="업체명"),
-    files: list[UploadFile] = File(..., description="견적서 이미지 여러개 업로드 가능"),
+    region: str = Form(..., description="서울|수도권|지방"),
+    building_age: str = Form(..., description="신축(3년이하)|10년이하|10~20년|20년이상"),
+    company_name: str = Form(..., description="업체명 (50자까지)"),
+    files: list[UploadFile] = File(..., description="견적서 이미지(PNG·JPG·WEBP), 10장·장당 10MB까지"),
 ):
     try:
+        # 장수와 용량은 파일을 메모리로 읽기 전에 본다. 나머지 검문(형식·크기·폼 값)은 서비스가 한다
+        check_upload_count(len(files))
+        for f in files:
+            if f.size is not None:
+                check_upload_size(f.size)
         image_bytes = [await f.read() for f in files]
         command = AnalyzeRiskCommand(
             space_type=space_type,
@@ -57,10 +64,15 @@ async def analyze_risk(
             image_files=image_bytes,
         )
         return await service.analyze(command)
+    except InputRejected as e:
+        log_event("input_rejected", level="warning", path=request.url.path, reason=e.reason)
+        raise HTTPException(status_code=422, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"리스크 분석 실패: {e}")
+        # 예외 글에는 내부 사정(객체 주소, 외부 API 응답 등)이 섞인다 — 로그에만 남기고 응답은 고정 문구로
+        log_event("risk_analyze_failed", level="error", error_type=type(e).__name__, error=str(e))
+        raise HTTPException(status_code=500, detail="리스크 분석에 실패했습니다. 잠시 후 다시 시도해 주세요.")
 
 
 @router.post("/save", status_code=201)

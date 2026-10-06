@@ -206,11 +206,6 @@ def load_records(split: str) -> list[dict]:
     return records
 
 
-def region_text(info: dict) -> str:
-    """리스크 진단은 지역을 자유 글로 받는다. 정답셋의 "수도권"은 지역 이름이 아니라서 경기로 넘긴다."""
-    return "경기" if info["지역"] == "수도권" else info["지역"]
-
-
 async def run(split: str) -> None:
     from motor.motor_asyncio import AsyncIOMotorClient
 
@@ -234,7 +229,7 @@ async def run(split: str) -> None:
         info = doc["info"]
         report = await service.analyze(AnalyzeRiskCommand(
             space_type=info["공간유형"], pyeong=info["평수"], room_count=3, floor=info["층수"], elevator=info["엘리베이터"],
-            region=region_text(info), building_age="10~20년", company_name="", image_files=[path.read_bytes()]))
+            region=info["지역"], building_age="10~20년", company_name="", image_files=[path.read_bytes()]))
         return muneo_findings(report)
 
     rows, details = [], []
