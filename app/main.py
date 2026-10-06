@@ -3,6 +3,8 @@ import uuid
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -51,6 +53,20 @@ async def log_requests(request: Request, call_next):
     )
     response.headers["X-Request-Id"] = request_id
     return response
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+    """응답은 FastAPI 기본(422 + detail) 그대로 두고, 무엇이 막혔는지만 로그에 남긴다 — 입력값 자체는 적지 않는다."""
+    log_event(
+        "input_rejected",
+        level="warning",
+        path=request.url.path,
+        reason="schema",
+        fields=[".".join(str(part) for part in error["loc"]) for error in exc.errors()][:20],
+        error_types=[error["type"] for error in exc.errors()][:20],
+    )
+    return await request_validation_exception_handler(request, exc)
 
 
 @app.exception_handler(Exception)

@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, BeforeValidator, Field
+from pydantic import BaseModel, BeforeValidator, Field, StringConstraints, field_validator, model_validator
 
 공종_리터럴 = Literal[
     "도배", "장판", "마루", "주방", "욕실", "전기/조명",
@@ -9,14 +9,14 @@ from pydantic import BaseModel, BeforeValidator, Field
 ]
 
 
-def _공백_제거(v):
+def 공백_제거(v):
     # 프론트가 "1개월 이내"처럼 공백 포함해 보내도 허용
     return v.replace(" ", "") if isinstance(v, str) else v
 
 
-def _건물연식_정규화(v):
+def 건물연식_정규화(v):
     # 프론트 표기 "10~20년 이하" → "10~20년"
-    v = _공백_제거(v)
+    v = 공백_제거(v)
     return "10~20년" if v == "10~20년이하" else v
 
 
@@ -24,6 +24,13 @@ def _트럭접근_정규화(v):
     # 프론트 표기 "불가(골목/지하)" → "불가(골목·지하)"
     return v.replace("/", "·") if isinstance(v, str) else v
 
+
+지역_리터럴 = Literal["서울", "수도권", "지방"]
+건물연식_리터럴 = Literal["신축(3년이하)", "10년이하", "10~20년", "20년이상"]
+공간유형_리터럴 = Literal["아파트", "빌라", "오피스텔", "단독주택"]
+
+# 옵션의 글자 값은 계수표에서 찾거나 검색 문장에 붙는다 — 고르는 값이라 길 이유가 없다
+옵션값 = Annotated[str, StringConstraints(max_length=30)]
 
 도배_범위_리터럴 = Literal[
     "전체", "거실", "침실", "주방",
@@ -33,48 +40,46 @@ def _트럭접근_정규화(v):
 
 class 도배옵션(BaseModel):
     범위: 도배_범위_리터럴 | list[도배_범위_리터럴] = "전체"
-    도배지종류: str = "실크벽지"
-    초배포함: str | None = None
+    도배지종류: 옵션값 = "실크벽지"
+    초배포함: 옵션값 | None = None
 
 
 class 마루옵션(BaseModel):
-    자재종류: str | None = None
-    범위: str = "전체"
-    철거여부: str | None = None
+    자재종류: 옵션값 | None = None
+    범위: 옵션값 = "전체"
+    철거여부: 옵션값 | None = None
 
 
 class 욕실옵션(BaseModel):
-    개수: int = 1
-    크기: str | None = None
-    도기교체: str | None = None
-    방수포함: str | None = None
-    욕조샤워부스: str | None = None
-    타일등급: str | None = None
+    개수: int = Field(default=1, ge=1, le=5)
+    크기: 옵션값 | None = None
+    도기교체: 옵션값 | None = None
+    방수포함: 옵션값 | None = None
+    욕조샤워부스: 옵션값 | None = None
+    타일등급: 옵션값 | None = None
 
 
 class 주방옵션(BaseModel):
-    싱크대교체: str | None = None
-    형태: str | None = None
-    길이: str | None = None
+    싱크대교체: 옵션값 | None = None
+    형태: 옵션값 | None = None
+    길이: 옵션값 | None = None
 
 
 class EstimateRequest(BaseModel):
     """가견적 생성 요청. 필드명은 기존 estimate_engine 입력 규격을 그대로 따른다."""
 
-    공종: list[공종_리터럴] = Field(default_factory=list)
+    # 범위는 리스크 진단 폼(app/domain/risk_input_guard.py)과 같다 — 근거는 그 파일 머리말
+    공종: list[공종_리터럴] = Field(default_factory=list, max_length=50)
     시공범위: Literal["전체", "부분"] = "부분"
-    공간유형: str = "아파트"
-    평수: int = Field(gt=0)
-    방개수: int = 3
-    지역: Literal["서울", "수도권", "지방"] = "서울"
+    공간유형: 공간유형_리터럴 = "아파트"
+    평수: int = Field(ge=5, le=150)
+    방개수: int = Field(default=3, ge=1, le=10)
+    지역: 지역_리터럴 = "서울"
 
-    건물연식: Annotated[
-        Literal["신축(3년이하)", "10년이하", "10~20년", "20년이상"],
-        BeforeValidator(_건물연식_정규화),
-    ] = "10~20년"
+    건물연식: Annotated[건물연식_리터럴, BeforeValidator(건물연식_정규화)] = "10~20년"
     자재등급: Literal["일반", "중급", "고급"] = "중급"
     철거여부: Literal["있음", "없음", "모름"] = "모름"
-    층수: int = 1
+    층수: int = Field(default=1, ge=-2, le=70)  # 음수는 지하·반지하
     엘리베이터: Literal["있음", "없음"] = "있음"
     트럭접근: Annotated[
         Literal["가능", "불가(골목·지하)", "모름"],
@@ -83,13 +88,32 @@ class EstimateRequest(BaseModel):
     거주중공사: Literal["거주중", "공실"] = "공실"
     공사시기: Annotated[
         Literal["1개월이내", "1~3개월", "3개월이후", "미정"],
-        BeforeValidator(_공백_제거),
+        BeforeValidator(공백_제거),
     ] = "미정"
 
     도배: 도배옵션 | None = None
     마루: 마루옵션 | None = None
     욕실: 욕실옵션 | None = None
     주방: 주방옵션 | None = None
+
+    @field_validator("공종")
+    @classmethod
+    def _공종_중복_제거(cls, v: list[str]) -> list[str]:
+        return list(dict.fromkeys(v))
+
+    @field_validator("층수")
+    @classmethod
+    def _0층_없음(cls, v: int) -> int:
+        if v == 0:
+            raise ValueError("0층은 없습니다. 지하는 음수로 입력해 주세요.")
+        return v
+
+    @model_validator(mode="after")
+    def _부분_시공은_공종_필수(self):
+        # 공종 없이 부분 시공이면 무엇의 값을 낼지 정해지지 않는다 — 엔진까지 보내지 않는다
+        if self.시공범위 == "부분" and not self.공종:
+            raise ValueError("부분 시공은 공종을 하나 이상 선택해야 합니다.")
+        return self
 
 
 class 금액범위(BaseModel):
@@ -157,7 +181,9 @@ class SavedEstimateSummary(BaseModel):
     id: str
     user_id: str
     created_at: datetime
-    input: EstimateRequest
+    # EstimateRequest로 검증하지 않는다 — 요청 범위를 좁히기 전에 저장된 견적(평수 301, 층수 0 등)이 있어서,
+    # 요청 규칙으로 다시 검증하면 그 사용자의 목록 조회가 통째로 실패한다
+    input: dict
     result: dict
     status: EstimateStatus
     valid_until: datetime

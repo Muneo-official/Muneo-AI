@@ -922,7 +922,8 @@ class EstimateEngine:
 
         양중 = 0
         if inp.get("엘리베이터") == "없음":
-            층수 = int(inp.get("층수") or 1)
+            # 지하(음수)도 그만큼 오르내린다 — 그대로 곱하면 양중비가 음수가 돼 총액을 깎는다
+            층수 = abs(int(inp.get("층수") or 1))
             양중 = 층수 * self._coeff("lifting_cost_per_floor")
             notes.append(f"사다리차 양중비 +{양중:,}원 ({층수}층)")
 
