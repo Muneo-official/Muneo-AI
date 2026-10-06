@@ -88,6 +88,9 @@ class RiskDetectorService:
         # 요청 하나가 전역 슬롯을 독점하지 않게 하는 요청당 상한. 업로드 이미지 수에 제한이 없어서,
         # 이게 없으면 큰 요청 하나가 슬롯을 다 차지하고 그동안 다른 사용자가 전부 기다린다.
         self._per_request_limit = vision_max_concurrency_per_request
+        # 이미지 디코딩은 화소당 3바이트를 쓴다(상한인 5천만 화소면 150MB). 요청 안에서는 한 장씩 풀지만 요청이
+        # 겹치면 그만큼 겹치므로, 프로세스 전체에서 동시에 푸는 장수를 묶는다
+        self._decode_slots = asyncio.Semaphore(2)
 
     async def analyze(self, command: AnalyzeRiskCommand) -> dict[str, Any]:
         command = self._validate_input(command)
@@ -255,7 +258,7 @@ class RiskDetectorService:
         client = get_async_client()
         # 리사이즈·PNG 인코딩은 CPU 작업이라 이벤트 루프를 막지 않게 threadpool에서
         chunks_per_image = [
-            (image_index, await run_in_threadpool(self._prepare_chunks, raw))
+            (image_index, await self._decode(raw))
             for image_index, raw in to_parse.values()
         ]
 
@@ -349,6 +352,10 @@ class RiskDetectorService:
             item for item in new_items
             if (item.get("category", ""), item.get("description", ""), int(item.get("amount") or 0)) not in seen
         ]
+
+    async def _decode(self, raw: bytes) -> list[bytes]:
+        async with self._decode_slots:
+            return await run_in_threadpool(self._prepare_chunks, raw)
 
     @staticmethod
     def _prepare_chunks(raw: bytes) -> list[bytes]:

@@ -370,3 +370,15 @@ async def test_list_estimates_returns_inputs_saved_before_limits_were_tightened(
 
     assert resp.status_code == 200
     assert resp.json()[0]["input"]["평수"] == 301
+
+
+@pytest.mark.parametrize("공종", [["설비"], ["마감/공과잡비"], ["설비", "마감/공과잡비"]])
+async def test_부분_시공인데_값을_낼_공종이_없으면_사례를_찾기_전에_오류를_낸다(공종):
+    from app.domain.estimate_engine import EstimateEngine
+
+    # case_repository가 None이라 사례 검색까지 가면 터진다 — 그 전에 돌아와야 한다
+    engine = EstimateEngine(case_repository=None, embedder=None, reranker=None)
+
+    result = await engine.generate({"공종": 공종, "시공범위": "부분", "평수": 30})
+
+    assert "견적을 낼 수 없습니다" in result["error"]

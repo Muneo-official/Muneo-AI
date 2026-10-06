@@ -134,3 +134,26 @@ def test_거부_문구에_사용자가_넣은_긴_글이_그대로_실리지_않
     with pytest.raises(InputRejected) as excinfo:
         guard.normalize_form(_command(space_type="x" * 5000))
     assert len(str(excinfo.value)) < 100
+
+
+def test_휴대폰_사진처럼_보조_이미지가_붙은_JPEG도_통과한다():
+    # PIL은 이런 파일의 형식을 JPEG가 아니라 MPO로 읽는다. 확장자는 .jpg다
+    buf = io.BytesIO()
+    frames = [Image.new("RGB", (100, 100), "white"), Image.new("RGB", (100, 100), "gray")]
+    frames[0].save(buf, format="MPO", save_all=True, append_images=frames[1:])
+    raw = buf.getvalue()
+    with Image.open(io.BytesIO(raw)) as img:
+        assert img.format == "MPO"
+    guard.check_images([raw])
+
+
+def test_범위는_가견적_스키마와_같은_값을_쓴다():
+    from app.schemas.estimate import EstimateRequest
+
+    for 평수, ok in ((guard.MIN_PYEONG, True), (guard.MAX_PYEONG, True), (guard.MAX_PYEONG + 1, False)):
+        try:
+            EstimateRequest(공종=["도배"], 평수=평수)
+            accepted = True
+        except ValueError:
+            accepted = False
+        assert accepted is ok

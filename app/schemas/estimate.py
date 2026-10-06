@@ -3,6 +3,8 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, BeforeValidator, Field, StringConstraints, field_validator, model_validator
 
+from app.schemas.risk import SpaceType
+
 공종_리터럴 = Literal[
     "도배", "장판", "마루", "주방", "욕실", "전기/조명",
     "목공", "도장", "설비", "창호", "도어", "필름", "가구", "철거", "마감/공과잡비",
@@ -27,7 +29,13 @@ def _트럭접근_정규화(v):
 
 지역_리터럴 = Literal["서울", "수도권", "지방"]
 건물연식_리터럴 = Literal["신축(3년이하)", "10년이하", "10~20년", "20년이상"]
-공간유형_리터럴 = Literal["아파트", "빌라", "오피스텔", "단독주택"]
+공간유형_리터럴 = SpaceType
+
+# 가견적과 리스크 진단이 같은 집을 다르게 받지 않도록 범위는 여기 한 곳에만 둔다
+# (리스크 진단 폼은 app/domain/risk_input_guard.py가 이 값을 가져다 쓴다 — 정한 근거는 그 파일 머리말)
+평수_범위 = (5, 150)
+방개수_범위 = (1, 10)
+층수_범위 = (-2, 70)  # 음수는 지하·반지하. 0층은 없다
 
 # 옵션의 글자 값은 계수표에서 찾거나 검색 문장에 붙는다 — 고르는 값이라 길 이유가 없다
 옵션값 = Annotated[str, StringConstraints(max_length=30)]
@@ -68,18 +76,17 @@ class 주방옵션(BaseModel):
 class EstimateRequest(BaseModel):
     """가견적 생성 요청. 필드명은 기존 estimate_engine 입력 규격을 그대로 따른다."""
 
-    # 범위는 리스크 진단 폼(app/domain/risk_input_guard.py)과 같다 — 근거는 그 파일 머리말
     공종: list[공종_리터럴] = Field(default_factory=list, max_length=50)
     시공범위: Literal["전체", "부분"] = "부분"
     공간유형: 공간유형_리터럴 = "아파트"
-    평수: int = Field(ge=5, le=150)
-    방개수: int = Field(default=3, ge=1, le=10)
+    평수: int = Field(ge=평수_범위[0], le=평수_범위[1])
+    방개수: int = Field(default=3, ge=방개수_범위[0], le=방개수_범위[1])
     지역: 지역_리터럴 = "서울"
 
     건물연식: Annotated[건물연식_리터럴, BeforeValidator(건물연식_정규화)] = "10~20년"
     자재등급: Literal["일반", "중급", "고급"] = "중급"
     철거여부: Literal["있음", "없음", "모름"] = "모름"
-    층수: int = Field(default=1, ge=-2, le=70)  # 음수는 지하·반지하
+    층수: int = Field(default=1, ge=층수_범위[0], le=층수_범위[1])
     엘리베이터: Literal["있음", "없음"] = "있음"
     트럭접근: Annotated[
         Literal["가능", "불가(골목·지하)", "모름"],

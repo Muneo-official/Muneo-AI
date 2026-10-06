@@ -46,7 +46,8 @@ async def analyze_risk(
     files: list[UploadFile] = File(..., description="견적서 이미지(PNG·JPG·WEBP), 10장·장당 10MB까지"),
 ):
     try:
-        # 장수와 용량은 파일을 메모리로 읽기 전에 본다. 나머지 검문(형식·크기·폼 값)은 서비스가 한다
+        # 장수와 용량은 파일을 메모리로 읽기 전에 본다. 나머지 검문(형식·크기·폼 값)은 서비스가 한다.
+        # 이 시점에 본문은 이미 임시 파일로 다 받은 뒤다 — 받는 양 자체는 app/main.py의 본문 크기 상한이 막는다
         check_upload_count(len(files))
         for f in files:
             if f.size is not None:
@@ -66,8 +67,6 @@ async def analyze_risk(
         return await service.analyze(command)
     except InputRejected as e:
         log_event("input_rejected", level="warning", path=request.url.path, reason=e.reason)
-        raise HTTPException(status_code=422, detail=str(e))
-    except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
     except Exception as e:
         # 예외 글에는 내부 사정(객체 주소, 외부 API 응답 등)이 섞인다 — 로그에만 남기고 응답은 고정 문구로

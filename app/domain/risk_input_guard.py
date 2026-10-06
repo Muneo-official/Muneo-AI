@@ -15,23 +15,26 @@ from typing import get_args
 
 from PIL import Image
 
-from app.domain.risk_constants import SUPPORTED_SPACE_TYPES
-from app.schemas.estimate import 건물연식_리터럴, 건물연식_정규화, 지역_리터럴
-from app.schemas.risk import AnalyzeRiskCommand
+from app.schemas.estimate import 건물연식_리터럴, 건물연식_정규화, 방개수_범위, 지역_리터럴, 층수_범위, 평수_범위
+from app.schemas.risk import AnalyzeRiskCommand, SpaceType
 from pipeline.image_prep import chunk_count
 
 MAX_IMAGES = 10
 MAX_FILE_BYTES = 10 * 1024 * 1024
+# 요청 본문 전체의 상한 — 파일 상한을 다 채운 요청에 폼 값·multipart 경계선 몫을 더한 값 (app/main.py가 쓴다)
+MAX_REQUEST_BYTES = MAX_IMAGES * MAX_FILE_BYTES + 1024 * 1024
 MAX_IMAGE_PIXELS = 50_000_000  # 5천만 화소 휴대폰 사진(8160×6120)까지. 디코딩하면 화소당 3바이트를 쓴다
 MAX_CHUNKS_PER_IMAGE = 8
 MAX_CHUNKS_PER_REQUEST = 20
-ALLOWED_IMAGE_FORMATS = ("PNG", "JPEG", "WEBP")
+# MPO는 보조 이미지(깊이·게인맵)가 붙은 JPEG다 — 휴대폰 사진이 .jpg인데도 PIL에는 이 형식으로 읽힌다
+ALLOWED_IMAGE_FORMATS = ("PNG", "JPEG", "MPO", "WEBP")
 
-MIN_PYEONG, MAX_PYEONG = 5, 150
-MIN_ROOM_COUNT, MAX_ROOM_COUNT = 1, 10
-MIN_FLOOR, MAX_FLOOR = -2, 70  # 음수는 지하·반지하. 0층은 없다
+MIN_PYEONG, MAX_PYEONG = 평수_범위
+MIN_ROOM_COUNT, MAX_ROOM_COUNT = 방개수_범위
+MIN_FLOOR, MAX_FLOOR = 층수_범위
 MAX_COMPANY_NAME_LENGTH = 50
 
+SPACE_TYPES = get_args(SpaceType)
 REGIONS = get_args(지역_리터럴)
 BUILDING_AGES = get_args(건물연식_리터럴)
 
@@ -62,7 +65,7 @@ def check_upload_size(size: int) -> None:
 
 def normalize_form(command: AnalyzeRiskCommand) -> AnalyzeRiskCommand:
     """폼 값을 검사하고, 표기만 다른 건물 연식("20년 이상")은 가견적과 같은 값으로 맞춰 돌려준다."""
-    if command.space_type not in SUPPORTED_SPACE_TYPES:
+    if command.space_type not in SPACE_TYPES:
         raise InputRejected("space_type", f"지원하지 않는 공간유형입니다: {command.space_type[:20]}")
     if not MIN_PYEONG <= command.pyeong <= MAX_PYEONG:
         raise InputRejected("pyeong", f"평수는 {MIN_PYEONG}~{MAX_PYEONG}평 사이로 입력해 주세요.")
@@ -110,12 +113,12 @@ def check_images(image_files: list[bytes]) -> None:
     for raw in image_files:
         check_upload_size(len(raw))
         width, height = _image_size(raw)
-        chunks = chunk_count(width, height)
-        if width * height > MAX_IMAGE_PIXELS or chunks > MAX_CHUNKS_PER_IMAGE:
+        # 화소를 먼저 본다 — 헤더에 터무니없는 크기를 적은 파일로 조각 수 계산을 오래 돌리지 못하게
+        if width * height > MAX_IMAGE_PIXELS or chunk_count(width, height) > MAX_CHUNKS_PER_IMAGE:
             raise InputRejected(
                 "image_too_large", "이미지가 너무 큽니다. 견적서를 여러 장으로 나누거나 해상도를 줄여서 올려 주세요."
             )
-        total_chunks += chunks
+        total_chunks += chunk_count(width, height)
     if total_chunks > MAX_CHUNKS_PER_REQUEST:
         raise InputRejected(
             "too_many_chunks", "한 번에 분석하기에는 견적서가 너무 깁니다. 이미지를 나눠서 올려 주세요."

@@ -14,6 +14,7 @@ from app.api.routers import estimates, risk_detector
 from app.core.deps import lifespan
 from app.core.logging import configure_logging, log_event, set_request_id
 from app.core.rate_limit import limiter
+from app.domain.risk_input_guard import MAX_REQUEST_BYTES
 
 # app/core/config.py(pydantic-settings)는 .env를 읽어 Settings 객체에만 채우고 os.environ엔
 # 안 넣는다. pipeline/vision_client.py의 anthropic.Anthropic()은 os.environ에서 직접
@@ -32,6 +33,21 @@ app.include_router(estimates.router)
 app.include_router(risk_detector.router)
 
 
+@app.middleware("http")
+async def limit_upload_size(request: Request, call_next):
+    """리스크 진단 업로드의 본문 크기 상한 — 라우터의 장수·용량 검문은 본문을 다 받은 뒤에야 돈다.
+
+    Content-Length로만 본다. 길이를 안 밝히는 전송(chunked)은 여기서 못 막으므로 앞단(프록시)에도 상한이 있어야 한다.
+    """
+    if request.method == "POST" and request.url.path == "/risk-detector/analyze":
+        length = request.headers.get("content-length", "")
+        if length.isdigit() and int(length) > MAX_REQUEST_BYTES:
+            log_event("input_rejected", level="warning", path=request.url.path, reason="body_too_large")
+            return JSONResponse(status_code=413, content={"detail": "올린 파일이 너무 큽니다. 이미지 수나 용량을 줄여 주세요."})
+    return await call_next(request)
+
+
+# 나중에 등록한 미들웨어가 바깥에서 돈다 — 위에서 막은 요청도 http_request 로그에 남도록 이게 뒤에 온다
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     request_id = str(uuid.uuid4())

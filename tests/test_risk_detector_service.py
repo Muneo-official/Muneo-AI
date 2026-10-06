@@ -702,3 +702,29 @@ async def test_겹친_줄이_없으면_소계_행을_그대로_둔다():
     items, _, _ = await service._parse_images([b"page-1", b"page-2"])
 
     assert [i["description"] for i in items].count("소계") == 2
+
+
+@pytest.mark.asyncio
+async def test_images_are_decoded_at_most_two_at_a_time_across_requests(monkeypatch):
+    # 디코딩은 장당 수백 MB까지 쓸 수 있다 — 요청이 겹쳐도 동시에 푸는 장수가 묶여야 한다
+    import threading
+
+    lock = threading.Lock()
+    active = peak = 0
+
+    def slow_prepare(raw):
+        nonlocal active, peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+        time.sleep(0.05)
+        with lock:
+            active -= 1
+        return [raw]
+    monkeypatch.setattr(service_module, "prepare_chunks_from_bytes", slow_prepare)
+    monkeypatch.setattr(service_module, "acall_vision_api_with_usage", _vision_returning(_ONE_ITEM_RESULT))
+    service = RiskDetectorService()
+
+    await asyncio.gather(*(service.analyze(_command(image_files=[f"img-{i}".encode()])) for i in range(6)))
+
+    assert peak == 2

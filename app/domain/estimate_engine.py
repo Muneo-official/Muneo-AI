@@ -1047,6 +1047,10 @@ class EstimateEngine:
     async def generate(self, inp: dict) -> dict:
         공종들     = [c for c in inp.get("공종", []) if c not in self._UNSUPPORTED_공종]
         시공범위   = inp.get("시공범위", "부분")
+        if 시공범위 == "부분" and not [c for c in 공종들 if c != "마감/공과잡비"]:
+            # 지원하지 않는 공종(설비)이나 마감/공과잡비만 고른 부분 시공 — 그대로 가면 값을 낼 공종이 없어
+            # 전체 리모델링 사례의 총금액이 견적으로 나간다
+            return {"error": "선택한 공종만으로는 견적을 낼 수 없습니다. 다른 공종을 함께 선택해 주세요."}
         query      = self.build_query(inp)
         cases      = await self.retrieve_cases(query, inp)
 

@@ -10,6 +10,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from app.core.deps import get_risk_detector_service, get_risk_report_repository
+from app.domain.risk_input_guard import InputRejected
 from app.main import app
 
 FORM_DATA = {
@@ -66,7 +67,7 @@ async def test_analyze_risk_success(client: AsyncClient):
 
 async def test_analyze_risk_invalid_input_returns_422(client: AsyncClient):
     mock_service = AsyncMock()
-    mock_service.analyze.side_effect = ValueError("지원하지 않는 공간유형입니다: 상가")
+    mock_service.analyze.side_effect = InputRejected("space_type", "지원하지 않는 공간유형입니다: 상가")
     app.dependency_overrides[get_risk_detector_service] = lambda: mock_service
 
     resp = await client.post("/risk-detector/analyze", data={**FORM_DATA, "space_type": "상가"}, files=FILES)
@@ -218,3 +219,34 @@ async def test_analyze_risk_real_service_rejects_non_image_before_vision(client:
     assert resp.status_code == 422
     assert "이미지 파일만" in resp.json()["detail"]
     assert [fields["reason"] for event, fields in events if event == "input_rejected"] == ["not_an_image"]
+
+
+async def test_analyze_risk_internal_value_error_is_500_not_422(client: AsyncClient):
+    # 입력 검문은 InputRejected로만 막는다. 그 밖의 ValueError(숫자 변환 실패 등)는 서버 쪽 오류라
+    # 사용자 입력 탓(422)으로 돌리지 않고, 예외 글도 응답에 싣지 않는다
+    mock_service = AsyncMock()
+    mock_service.analyze.side_effect = ValueError("invalid literal for int() with base 10: '1,200,000'")
+    app.dependency_overrides[get_risk_detector_service] = lambda: mock_service
+
+    resp = await client.post(
+        "/risk-detector/analyze", data=FORM_DATA, files=FILES, headers={"x-user-id": "risk_guard_valueerror_user"},
+    )
+
+    assert resp.status_code == 500
+    assert "invalid literal" not in resp.text
+
+
+async def test_analyze_risk_oversized_body_returns_413_before_parsing(client: AsyncClient, monkeypatch):
+    import app.main as main_module
+
+    monkeypatch.setattr(main_module, "MAX_REQUEST_BYTES", 1000)
+    mock_service = AsyncMock()
+    app.dependency_overrides[get_risk_detector_service] = lambda: mock_service
+    files = [("files", ("big.png", b"x" * 5000, "image/png"))]
+
+    resp = await client.post(
+        "/risk-detector/analyze", data=FORM_DATA, files=files, headers={"x-user-id": "risk_guard_body_user"},
+    )
+
+    assert resp.status_code == 413
+    mock_service.analyze.assert_not_awaited()
