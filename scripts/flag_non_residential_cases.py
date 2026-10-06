@@ -41,13 +41,15 @@ async def main(apply: bool) -> None:
             {"request_body_text": {"$regex": PATTERN}},
         ],
     }
-    cursor = col.find(query, {"article_id": 1, "region": 1, "size_pyeong": 1, "cost_per_pyeong": 1})
+    cursor = col.find(query, {"article_id": 1, "region": 1, "size_pyeong": 1, "total_cost": 1})
 
     matched = []
     async for doc in cursor:
         matched.append(doc)
-        print(f"  {doc['article_id']}  {doc.get('region')}/{doc.get('size_pyeong')}평  "
-              f"평당 {doc.get('cost_per_pyeong', 0):,}원")
+        # 저장된 cost_per_pyeong은 수집 때 한 번만 계산돼, 평수가 나중에 보정된 사례는 예전 값(주로 0)이다
+        pyeong = doc.get("size_pyeong") or 0
+        per_pyeong = int((doc.get("total_cost") or 0) / pyeong) if pyeong > 0 else 0
+        print(f"  {doc['article_id']}  {doc.get('region')}/{doc.get('size_pyeong')}평  평당 {per_pyeong:,}원")
 
     if apply:
         ids = [d["_id"] for d in matched]
