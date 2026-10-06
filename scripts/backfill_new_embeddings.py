@@ -6,10 +6,9 @@ pipeline/ingest.py의 route_and_save()는 embedding을 계산하지 않는다 �
 문서나 마찬가지다(eval/results/reranker_hybrid_eval.md "851건 추가 후 재검증 시도" 참고 —
 851건을 새로 넣었는데 precision@k가 이전 문서 수치와 소수점까지 동일하게 나온 원인이 이거였다).
 
-scripts/backfill_embeddings.py와는 다른 스크립트다 — 그건 예전 Chroma Cloud 코퍼스를
-Mongo로 옮긴 일회성 마이그레이션(article_id 매칭으로 기존 임베딩을 그대로 복사)이고,
-새로 파싱되는 케이스의 임베딩을 만들어주지는 않는다. 이 스크립트는 크롤링이 반복될
-때마다(=embedding 없는 문서가 쌓일 때마다) 계속 재실행할 수 있다.
+이 스크립트는 크롤링이 반복될 때마다(=embedding 없는 문서가 쌓일 때마다) 계속 재실행할 수 있다.
+(처음 Chroma Cloud 코퍼스를 Mongo로 옮길 때는 기존 임베딩을 그대로 복사했다 — 그 일회성 이관
+스크립트는 지웠고, 새로 파싱되는 케이스의 임베딩은 여기서만 만든다.)
 
 임베딩 대상 텍스트는 pipeline/reference/build_rag.py의 build_document()와 동일한 조합
 (평수/지역/공종/요청 전문, 트렁케이션 없음)을 쓴다 — app/domain/estimate_engine.py의

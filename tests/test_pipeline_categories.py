@@ -14,7 +14,7 @@ def test_unrecognized_category_returns_none():
 
 
 def test_new_misc_expense_category_maps_correctly():
-    # pipeline/prompts.py 규칙7에서 신설한 표준 카테고리 — "기타공사"의 실제 내용(승강기
+    # 프롬프트로 분류를 유도하던 때 신설한 표준 카테고리 — "기타공사"의 실제 내용(승강기
     # 보양비, 주민동의서 대행료 등)이 부대비용이었다는 조사 결과를 반영
     assert normalize_category("기타/공과잡비") == "공과잡비"
 

@@ -1,6 +1,6 @@
 """Vision API 구조화 출력(tool use) 정의 — category를 enum으로 강제한다.
 
-Phase 1(pipeline/prompts.py)까지는 자유 텍스트 category를 프롬프트 지시로만 유도했다.
+처음에는 자유 텍스트 category를 프롬프트 지시로만 유도했다.
 "단가참고" 같은 표 제목을 category로 복사하는 문제(pipeline/results/prompt_category_fix.md)를
 프롬프트 지시만으로 완전히 막을 수 없었던 이유가 이거다 — 지시를 아무리 정교하게 써도
 모델이 자유 텍스트를 낼 수 있는 한 이탈 가능성이 항상 남는다.
@@ -123,9 +123,8 @@ _risk_item_schema["properties"]["category"]["description"] += (
 )
 _risk_item_schema["required"] = ["code", *_risk_item_schema["required"]]
 
-# tool use와 함께 쓰는 지시문 — 표/집계행 판별, total_cost 산정, 열 뒤바뀜 수정 등은
-# pipeline/prompts.py의 규칙 1~6과 동일하되, category 표준화(규칙 7/7-1)는 enum이
-# 구조적으로 강제하므로 프롬프트에서 뺐다.
+# tool use와 함께 쓰는 지시문 — 어떤 표를 읽을지, 집계 행 제외, 금액·단가 열 구분, 잘린 이미지, 자기검증을 담는다.
+# 여기에 없는 것: category 표준화(enum이 구조적으로 강제한다), total_cost의 합계 우선순위(위 도구의 total_cost 설명에 있다).
 TOOL_USE_INSTRUCTIONS = """이 이미지가 인테리어 공사 견적서인지 판단하고, record_estimate 도구를 호출해 결과를 기록해줘.
 
 ━━━ 어떤 테이블을 파싱할 것인가 ━━━

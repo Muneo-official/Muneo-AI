@@ -18,6 +18,8 @@
 
 ## 수정
 
+> 이 문서의 `pipeline/prompts.py`는 파싱을 도구 호출 방식(`pipeline/tool_schema.py`)으로 바꾼 뒤 쓰이지 않아 지웠다. 아래 내용은 당시의 기록이고, 파일은 git 이력에 있다.
+
 `pipeline/prompts.py`(신규, `pipeline/reference/parse_estimates.py`의 PARSE_PROMPT을 원본으로):
 
 1. **규칙 7에 "기타/공과잡비" 표준 카테고리 추가** — 승강기 보양, 주민동의서, 폐기물처리,
