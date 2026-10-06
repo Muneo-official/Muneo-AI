@@ -29,6 +29,7 @@ import sys
 
 from PIL import Image
 
+from app.domain.risk_input_guard import MAX_CHUNKS_PER_IMAGE, MAX_CHUNKS_PER_REQUEST, MAX_PYEONG, MIN_PYEONG
 from pipeline.crawl_filter import is_boilerplate
 from scripts.bench.common import DEFAULT_CASES_FILE, count_chunks
 
@@ -46,8 +47,16 @@ BUCKETS = {
     "S1": {"desc": "이미지 1장, 1청크", "multi": False, "chunks": (1, 1)},
     "S2": {"desc": "이미지 1장, 2~3청크", "multi": False, "chunks": (2, 3)},
     "S3": {"desc": "이미지 여러 장, 총 3~5청크", "multi": True, "chunks": (3, 5)},
-    "S4": {"desc": "이미지 여러 장, 총 6청크 이상", "multi": True, "chunks": (6, 99)},
+    # 위쪽 끝은 요청당 조각 상한 — 넘는 요청은 Vision까지 가지 못하고 422로 끝난다
+    "S4": {"desc": "이미지 여러 장, 총 6청크 이상", "multi": True, "chunks": (6, MAX_CHUNKS_PER_REQUEST)},
 }
+
+
+def _form_region(folder_region: str) -> str:
+    """수집 폴더의 지역 이름(경기, 부산 …)을 리스크 진단 폼이 받는 값으로 바꾼다."""
+    if folder_region == "서울":
+        return "서울"
+    return "수도권" if folder_region in ("경기", "인천") else "지방"
 
 
 def _page_order(path: pathlib.Path) -> tuple[int, str]:
@@ -71,7 +80,7 @@ def _scan_article(article_dir: pathlib.Path) -> dict | None:
                 w, h = img.size
         except OSError:
             continue
-        if min(w, h) < MIN_SIDE_PX or h / w < MIN_ASPECT:
+        if min(w, h) < MIN_SIDE_PX or h / w < MIN_ASPECT or count_chunks(w, h) > MAX_CHUNKS_PER_IMAGE:
             continue
         images.append({"path": p.as_posix(), "width": w, "height": h, "chunks": count_chunks(w, h)})
     if not images:
@@ -133,11 +142,12 @@ def _to_case(case_id: str, desc: str, a: dict) -> dict:
         # 폼 값은 결과(가격 체크 비교 사례)에만 영향 — 케이스 간 비교가 되도록 공간 조건은 고정한다
         "form": {
             "space_type": "아파트",
-            "pyeong": a["pyeong"],
+            # 수집 메타의 평수에는 깨진 값이 섞여 있다 — 폼이 받는 범위 안으로
+            "pyeong": min(max(int(a["pyeong"]), MIN_PYEONG), MAX_PYEONG),
             "room_count": 3,
             "floor": 10,
             "elevator": True,
-            "region": a["region"],
+            "region": _form_region(a["region"]),
             "building_age": "10~20년",
             "company_name": "벤치마크",
         },

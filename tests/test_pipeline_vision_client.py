@@ -77,15 +77,19 @@ async def test_async_version_returns_same_shape():
     assert (call.input_tokens, call.output_tokens) == (1500, 300)
 
 
-def test_risk_params_differ_from_collection_params_only_in_tool_schema():
-    # 같은 모델로 보내면 수집 경로와 스키마만 다르다 (리스크 경로의 모델 교체는 별도 테스트)
+def test_risk_params_differ_from_collection_params_only_in_tool_schema_and_instructions():
+    # 같은 모델로 보내면 수집 경로와 스키마·지시문만 다르다 (리스크 경로의 모델 교체는 별도 테스트)
     risk = build_risk_api_params(b"img", vision_client.MODEL)
     collection = build_api_params(b"img")
 
     assert risk["tools"] == [RISK_ESTIMATE_TOOL]
     assert collection["tools"] == [ESTIMATE_TOOL]
-    # 모델·max_tokens·tool_choice·메시지(이미지+지시문)는 같다 — 결과 차이를 스키마 변경 하나로만 설명할 수 있게
-    assert {k: v for k, v in risk.items() if k != "tools"} == {k: v for k, v in collection.items() if k != "tools"}
+    # 모델·max_tokens·tool_choice·이미지는 같다. 지시문은 리스크 진단이 소계 행과 금액 없는 행을 받도록 한 단락이 다르다
+    rest = lambda p: {k: v for k, v in p.items() if k not in ("tools", "messages")}  # noqa: E731
+    assert rest(risk) == rest(collection)
+    assert risk["messages"][0]["content"][0] == collection["messages"][0]["content"][0]
+    assert risk["messages"][0]["content"][1]["text"] == vision_client.RISK_TOOL_USE_INSTRUCTIONS
+    assert collection["messages"][0]["content"][1]["text"] == vision_client.TOOL_USE_INSTRUCTIONS
 
 
 def test_sync_call_keeps_collection_schema():

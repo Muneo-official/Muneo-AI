@@ -44,8 +44,9 @@ def test_collection_schema_keeps_all_item_fields():
     assert _item_required(ESTIMATE_TOOL) == ["category", "description", "amount"]
 
 
-def test_risk_schema_drops_unit_and_quantity_requires_code_and_adds_film_rule():
-    assert set(_item_properties(ESTIMATE_TOOL)) - set(_item_properties(RISK_ESTIMATE_TOOL)) == {"unit", "quantity"}
+def test_risk_schema_drops_quantity_requires_code_and_adds_film_rule():
+    # unit은 다시 받는다 — 수량이 평인지 ㎡인지는 금액 ÷ 단가로 알 수 없다. quantity는 계산되므로 계속 뺀다
+    assert set(_item_properties(ESTIMATE_TOOL)) - set(_item_properties(RISK_ESTIMATE_TOOL)) == {"quantity"}
     # code는 필수 + 채우는 규칙 설명 — 청크마다 code 유무가 달라 겹침 중복이 새던 문제 대응
     assert _item_required(RISK_ESTIMATE_TOOL) == ["code", "category", "description", "amount"]
     assert _item_properties(RISK_ESTIMATE_TOOL)["code"]["type"] == "string"
@@ -70,3 +71,13 @@ def test_risk_schema_drops_unit_and_quantity_requires_code_and_adds_film_rule():
     assert risk_schema == collection_schema
     assert RISK_ESTIMATE_TOOL["input_schema"]["required"] == ESTIMATE_TOOL["input_schema"]["required"]
     assert (RISK_ESTIMATE_TOOL["name"], RISK_ESTIMATE_TOOL["description"]) == (TOOL_NAME, ESTIMATE_TOOL["description"])
+
+
+def test_리스크_지시문은_소계_행과_금액_없는_행을_받고_수집_지시문은_그대로다():
+    from pipeline.tool_schema import RISK_TOOL_USE_INSTRUCTIONS, TOOL_USE_INSTRUCTIONS
+
+    assert "집계 행은 반드시 제외" in TOOL_USE_INSTRUCTIONS and "소계 행은 line_items에 포함" not in TOOL_USE_INSTRUCTIONS
+    assert "집계 행은 반드시 제외" not in RISK_TOOL_USE_INSTRUCTIONS
+    assert "소계 행은 line_items에 포함" in RISK_TOOL_USE_INSTRUCTIONS and '"별도"' in RISK_TOOL_USE_INSTRUCTIONS
+    # 나머지 단락(표 고르기, 열 구분, 잘린 이미지)은 같다
+    assert "상세 테이블이 보이면 반드시 상세 테이블만 파싱한다" in RISK_TOOL_USE_INSTRUCTIONS

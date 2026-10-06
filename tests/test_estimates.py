@@ -279,3 +279,106 @@ async def test_submit_feedback_estimate_not_found_returns_404(client: AsyncClien
 
     assert resp.status_code == 404
     mock_feedback_repo.create.assert_not_awaited()
+
+
+@pytest.mark.parametrize("override", [
+    {"평수": 4}, {"평수": 151}, {"평수": 9_999_999},
+    {"방개수": 0}, {"방개수": 11}, {"방개수": -5},
+    {"층수": 0}, {"층수": -3}, {"층수": 71}, {"층수": 99_999},
+    {"공간유형": "상가"}, {"공간유형": "x" * 5000},
+    {"욕실": {"개수": 0}}, {"욕실": {"개수": -3}}, {"욕실": {"개수": 6}}, {"욕실": {"크기": "y" * 31}},
+    {"도배": {"도배지종류": "가" * 31}}, {"마루": {"자재종류": "가" * 31}},
+    {"공종": []}, {"공종": ["도배"] * 51},
+])
+async def test_generate_estimate_out_of_range_input_returns_422(client: AsyncClient, override: dict):
+    mock_engine = AsyncMock()
+    app.dependency_overrides[get_engine] = lambda: mock_engine
+    app.dependency_overrides[get_pending_estimate_repository] = lambda: _mock_pending_repo()
+
+    resp = await client.post(
+        "/estimates/generate", json={**VALID_REQUEST, **override}, headers={"x-user-id": "estimate_guard_user_a"},
+    )
+
+    assert resp.status_code == 422
+    mock_engine.generate.assert_not_awaited()
+
+
+@pytest.mark.parametrize("override", [
+    {"평수": 5}, {"평수": 150}, {"방개수": 1}, {"방개수": 10}, {"층수": -2}, {"층수": 70},
+    {"공간유형": "단독주택"}, {"욕실": {"개수": 5}}, {"공종": [], "시공범위": "전체"},
+])
+async def test_generate_estimate_boundary_input_reaches_engine(client: AsyncClient, override: dict):
+    mock_engine = AsyncMock()
+    mock_engine.generate.return_value = SAMPLE_RESULT
+    app.dependency_overrides[get_engine] = lambda: mock_engine
+    app.dependency_overrides[get_pending_estimate_repository] = lambda: _mock_pending_repo()
+
+    resp = await client.post(
+        "/estimates/generate", json={**VALID_REQUEST, **override}, headers={"x-user-id": "estimate_guard_user_b"},
+    )
+
+    assert resp.status_code == 200
+
+
+async def test_generate_estimate_deduplicates_categories_keeping_order(client: AsyncClient):
+    mock_engine = AsyncMock()
+    mock_engine.generate.return_value = SAMPLE_RESULT
+    app.dependency_overrides[get_engine] = lambda: mock_engine
+    app.dependency_overrides[get_pending_estimate_repository] = lambda: _mock_pending_repo()
+
+    body = {"평수": 30, "공종": ["욕실", "도배", "욕실", "도배", "주방"]}
+    resp = await client.post("/estimates/generate", json=body, headers={"x-user-id": "estimate_guard_user_c"})
+
+    assert resp.status_code == 200
+    assert mock_engine.generate.await_args.args[0]["공종"] == ["욕실", "도배", "주방"]
+
+
+async def test_rejected_request_is_logged_without_input_values(client: AsyncClient, monkeypatch):
+    import app.main as main_module
+
+    events: list[tuple[str, dict]] = []
+    monkeypatch.setattr(main_module, "log_event", lambda event, **fields: events.append((event, fields)))
+    app.dependency_overrides[get_engine] = lambda: AsyncMock()
+    app.dependency_overrides[get_pending_estimate_repository] = lambda: _mock_pending_repo()
+
+    body = {**VALID_REQUEST, "공간유형": "비밀스러운-입력값"}
+    resp = await client.post("/estimates/generate", json=body, headers={"x-user-id": "estimate_guard_user_d"})
+
+    assert resp.status_code == 422
+    [rejected] = [fields for event, fields in events if event == "input_rejected"]
+    assert rejected["fields"] == ["body.공간유형"]
+    assert "비밀스러운-입력값" not in str(rejected)
+
+
+async def test_list_estimates_returns_inputs_saved_before_limits_were_tightened(client: AsyncClient):
+    # 범위를 좁히기 전에 저장된 견적(평수 301, 층수 0)이 있어도 목록 조회가 실패하면 안 된다
+    mock_repo = AsyncMock()
+    mock_repo.list_by_user.return_value = [
+        {
+            "id": "665f1a2b3c4d5e6f7a8b9c0d",
+            "user_id": "user_abc",
+            "created_at": "2026-08-16T00:00:00Z",
+            "input": {"공종": ["도배"], "평수": 301, "층수": 0},
+            "result": {},
+            "status": "saved",
+            "valid_until": "2026-09-15T00:00:00Z",
+        }
+    ]
+    app.dependency_overrides[get_estimate_repository] = lambda: mock_repo
+
+    resp = await client.get("/estimates", headers=USER_HEADER)
+
+    assert resp.status_code == 200
+    assert resp.json()[0]["input"]["평수"] == 301
+
+
+@pytest.mark.parametrize("공종", [["설비"], ["마감/공과잡비"], ["설비", "마감/공과잡비"]])
+async def test_부분_시공인데_값을_낼_공종이_없으면_사례를_찾기_전에_오류를_낸다(공종):
+    from app.domain.estimate_engine import EstimateEngine
+
+    # case_repository가 None이라 사례 검색까지 가면 터진다 — 그 전에 돌아와야 한다
+    engine = EstimateEngine(case_repository=None, embedder=None, reranker=None)
+
+    result = await engine.generate({"공종": 공종, "시공범위": "부분", "평수": 30})
+
+    assert "견적을 낼 수 없습니다" in result["error"]

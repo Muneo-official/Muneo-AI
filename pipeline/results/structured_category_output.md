@@ -2,6 +2,8 @@
 
 ## 배경
 
+> 이 문서의 `pipeline/prompts.py`는 파싱을 도구 호출 방식(`pipeline/tool_schema.py`)으로 바꾼 뒤 쓰이지 않아 지웠다. 아래 내용은 당시의 기록이고, 파일은 git 이력에 있다.
+
 Phase 1(`pipeline/prompts.py`)에서 프롬프트 규칙으로 카테고리 표준화를 유도했지만, 목표했던
 "단가참고" 재분류 버그의 직접 재현·검증에는 실패했다(`pipeline/results/prompt_category_fix.md`).
 결론에서 짚었듯 — 자유 텍스트 출력인 이상 프롬프트 지시를 아무리 정교하게 써도 모델이 이탈할

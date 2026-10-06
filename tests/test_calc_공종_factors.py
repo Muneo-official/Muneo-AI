@@ -34,3 +34,10 @@ def test_주방_단독_선택_시_보정_없음():
     factors = _engine().calc_공종_factors({"공종": ["주방"], "방개수": 3})
 
     assert "주방" not in factors
+
+
+def test_지하층은_양중비가_음수가_되지_않는다():
+    # 층수를 그대로 곱하면 지하 2층의 양중비가 -30만 원이 돼 총액을 깎는다
+    _, notes, 양중, _ = _engine().calc_factors({"엘리베이터": "없음", "층수": -2})
+    assert 양중 == _engine().calc_factors({"엘리베이터": "없음", "층수": 2})[2] > 0
+    assert any("2층" in note for note in notes)
