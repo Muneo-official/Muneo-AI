@@ -7,6 +7,7 @@ from pipeline.image_prep import (
     CHUNK_HEIGHT,
     MAX_PARSE_WIDTH,
     SPLIT_HEIGHT_THRESHOLD,
+    chunk_count,
     prepare_chunks,
     prepare_chunks_from_bytes,
     resize_for_parse,
@@ -78,3 +79,15 @@ def test_prepare_chunks_from_bytes_splits_tall_image_same_as_path_variant():
     raw = _png_bytes((700, SPLIT_HEIGHT_THRESHOLD + 100))
     chunks = prepare_chunks_from_bytes(raw)
     assert len(chunks) == 2
+
+
+def test_chunk_count_matches_actual_chunks_without_decoding():
+    # 업로드 검문이 Vision 호출 수를 미리 세는 값 — 실제로 나뉘는 조각 수와 어긋나면 상한이 새거나 멀쩡한 견적서를 막는다
+    sizes = [
+        (800, 600), (1400, 3000), (1400, 3001), (1400, 3800), (1400, 3801), (1400, 5600), (1400, 5601),
+        (2800, 6000), (2800, 6002), (1600, 12188), (813, 2753), (700, 9000),
+    ]
+    for width, height in sizes:
+        buf = io.BytesIO()
+        Image.new("RGB", (width, height)).save(buf, format="PNG")
+        assert chunk_count(width, height) == len(prepare_chunks_from_bytes(buf.getvalue())), (width, height)

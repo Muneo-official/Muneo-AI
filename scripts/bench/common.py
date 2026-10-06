@@ -14,14 +14,7 @@ import subprocess
 from collections import defaultdict
 from datetime import datetime
 
-from PIL import Image
-
-from pipeline.image_prep import (
-    MAX_PARSE_WIDTH,
-    SPLIT_HEIGHT_THRESHOLD,
-    prepare_chunks_from_bytes,
-    split_vertically,
-)
+from pipeline.image_prep import chunk_count, prepare_chunks_from_bytes
 from pipeline.parsing import _safe_int, is_subtotal_row
 
 BENCH_DIR = pathlib.Path("logs/bench")  # logs/는 gitignore — 크롤링 데이터 경로·파싱 결과가 섞여서
@@ -72,16 +65,8 @@ def percentile(values: list[float], p: float) -> float:
 
 
 def count_chunks(width: int, height: int) -> int:
-    """pipeline.image_prep._prepare_chunks()가 이 크기의 이미지를 몇 청크로 쪼갤지 — API 호출 없이.
-
-    리사이즈 후 높이로 판정하고, 분할 루프는 split_vertically()를 1px 폭 더미 이미지에 그대로
-    돌려서 센다(분할 규칙을 여기에 복제하지 않으려고).
-    """
-    if width > MAX_PARSE_WIDTH:
-        height = int(height * MAX_PARSE_WIDTH / width)
-    if height <= SPLIT_HEIGHT_THRESHOLD:
-        return 1
-    return len(split_vertically(Image.new("1", (1, height))))
+    """이 크기의 이미지가 몇 청크로 쪼개질지 — 업로드 검문이 쓰는 것과 같은 함수로 센다."""
+    return chunk_count(width, height)
 
 
 def log_size(log_file: pathlib.Path) -> int:

@@ -21,8 +21,8 @@ from starlette.concurrency import run_in_threadpool
 
 from app.core.logging import log_event
 from app.domain.risk_analyzer import RiskAnalyzer
-from app.domain.risk_constants import SUPPORTED_SPACE_TYPES
 from app.domain.risk_formatter import ResponseFormatter
+from app.domain.risk_input_guard import InputRejected, check_images, normalize_form
 from app.domain.risk_models import RiskIssue
 from app.domain.unit_price_reference import UnitPriceReference
 from app.repositories.risk_parse_cache_repository import CachedParse, RiskParseCacheRepository
@@ -88,13 +88,21 @@ class RiskDetectorService:
         # 요청 하나가 전역 슬롯을 독점하지 않게 하는 요청당 상한. 업로드 이미지 수에 제한이 없어서,
         # 이게 없으면 큰 요청 하나가 슬롯을 다 차지하고 그동안 다른 사용자가 전부 기다린다.
         self._per_request_limit = vision_max_concurrency_per_request
+        # 이미지 디코딩은 화소당 3바이트를 쓴다(상한인 5천만 화소면 150MB). 요청 안에서는 한 장씩 풀지만 요청이
+        # 겹치면 그만큼 겹치므로, 프로세스 전체에서 동시에 푸는 장수를 묶는다
+        self._decode_slots = asyncio.Semaphore(2)
 
     async def analyze(self, command: AnalyzeRiskCommand) -> dict[str, Any]:
-        self._validate_input(command)
+        command = self._validate_input(command)
         started = time.perf_counter()
 
         all_items, vision_calls, cache_log = await self._parse_images(command.image_files)
         parsed_at = time.perf_counter()
+        # 모델이 모든 조각을 "견적서가 아니다"라고 답했다 — 풍경 사진·영수증 같은 것. 리포트 대신 오류로 돌려준다.
+        # 답을 못 받은 조각(거부·출력 한도)이 하나라도 있으면 단정하지 않고 아래 "추출 실패" 리포트로 간다.
+        not_an_estimate = bool(not all_items and vision_calls) and all(
+            call.tool_called and not call.result.get("is_estimate") for call in vision_calls
+        )
         rule_analyze_s = price_check_s = 0.0
 
         if all_items:
@@ -154,8 +162,15 @@ class RiskDetectorService:
             output_tokens=sum(c.output_tokens for c in vision_calls),
             cache_creation_input_tokens=sum(c.cache_creation_input_tokens for c in vision_calls),
             cache_read_input_tokens=sum(c.cache_read_input_tokens for c in vision_calls),
+            not_an_estimate=not_an_estimate,
             **cache_log,
         )
+        if not_an_estimate:
+            # 계측 로그를 남긴 뒤에 막는다 — 막은 요청도 Vision 비용은 이미 들었다
+            raise InputRejected(
+                "not_an_estimate",
+                "견적서로 보이지 않는 이미지입니다. 품목과 금액이 적힌 견적서 이미지를 올려 주세요.",
+            )
         return result
 
     async def _parse_images(
@@ -243,7 +258,7 @@ class RiskDetectorService:
         client = get_async_client()
         # 리사이즈·PNG 인코딩은 CPU 작업이라 이벤트 루프를 막지 않게 threadpool에서
         chunks_per_image = [
-            (image_index, await run_in_threadpool(prepare_chunks_from_bytes, raw))
+            (image_index, await self._decode(raw))
             for image_index, raw in to_parse.values()
         ]
 
@@ -338,11 +353,27 @@ class RiskDetectorService:
             if (item.get("category", ""), item.get("description", ""), int(item.get("amount") or 0)) not in seen
         ]
 
-    def _validate_input(self, command: AnalyzeRiskCommand) -> None:
-        if command.space_type not in SUPPORTED_SPACE_TYPES:
-            raise ValueError(f"지원하지 않는 공간유형입니다: {command.space_type}")
-        if not command.image_files or not any(command.image_files):
-            raise ValueError("최소 1개 이상의 견적서 이미지가 필요합니다.")
+    async def _decode(self, raw: bytes) -> list[bytes]:
+        async with self._decode_slots:
+            return await run_in_threadpool(self._prepare_chunks, raw)
+
+    @staticmethod
+    def _prepare_chunks(raw: bytes) -> list[bytes]:
+        try:
+            return prepare_chunks_from_bytes(raw)
+        except Exception as e:
+            # 헤더는 멀쩡해서 검문(check_images)을 지났는데 디코딩이 안 되는 파일 — 중간에 잘렸거나 깨진 이미지다.
+            # 여기까지는 Vision을 부르기 전이라 비용이 없다.
+            log_event("risk_image_decode_failed", level="warning", error=repr(e))
+            raise InputRejected(
+                "broken_image", "이미지를 열 수 없습니다. 파일이 손상되지 않았는지 확인한 뒤 다시 올려 주세요."
+            ) from e
+
+    def _validate_input(self, command: AnalyzeRiskCommand) -> AnalyzeRiskCommand:
+        """검문을 통과한 요청만 Vision으로 간다. 표기를 맞춘 요청을 돌려준다."""
+        command = normalize_form(command)
+        check_images(command.image_files)
+        return command
 
     def _add_contextual_issues(
         self,

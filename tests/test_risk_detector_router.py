@@ -10,6 +10,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from app.core.deps import get_risk_detector_service, get_risk_report_repository
+from app.domain.risk_input_guard import InputRejected
 from app.main import app
 
 FORM_DATA = {
@@ -66,7 +67,7 @@ async def test_analyze_risk_success(client: AsyncClient):
 
 async def test_analyze_risk_invalid_input_returns_422(client: AsyncClient):
     mock_service = AsyncMock()
-    mock_service.analyze.side_effect = ValueError("지원하지 않는 공간유형입니다: 상가")
+    mock_service.analyze.side_effect = InputRejected("space_type", "지원하지 않는 공간유형입니다: 상가")
     app.dependency_overrides[get_risk_detector_service] = lambda: mock_service
 
     resp = await client.post("/risk-detector/analyze", data={**FORM_DATA, "space_type": "상가"}, files=FILES)
@@ -156,3 +157,96 @@ async def test_delete_report_invalid_id_returns_400(client: AsyncClient):
     resp = await client.delete("/risk-detector/not-a-valid-object-id", headers=USER_HEADER)
 
     assert resp.status_code == 400
+
+
+async def test_analyze_risk_too_many_files_returns_422_without_calling_service(client: AsyncClient):
+    mock_service = AsyncMock()
+    app.dependency_overrides[get_risk_detector_service] = lambda: mock_service
+    files = [("files", (f"{i}.png", b"fake-png-bytes", "image/png")) for i in range(11)]
+
+    resp = await client.post(
+        "/risk-detector/analyze", data=FORM_DATA, files=files, headers={"x-user-id": "risk_guard_count_user"},
+    )
+
+    assert resp.status_code == 422
+    assert "10장" in resp.json()["detail"]
+    mock_service.analyze.assert_not_awaited()
+
+
+async def test_analyze_risk_empty_file_returns_422_without_calling_service(client: AsyncClient):
+    mock_service = AsyncMock()
+    app.dependency_overrides[get_risk_detector_service] = lambda: mock_service
+    files = [*FILES, ("files", ("empty.png", b"", "image/png"))]
+
+    resp = await client.post(
+        "/risk-detector/analyze", data=FORM_DATA, files=files, headers={"x-user-id": "risk_guard_empty_user"},
+    )
+
+    assert resp.status_code == 422
+    mock_service.analyze.assert_not_awaited()
+
+
+async def test_analyze_risk_500_does_not_leak_exception_text(client: AsyncClient):
+    mock_service = AsyncMock()
+    mock_service.analyze.side_effect = RuntimeError("cannot identify image file <_io.BytesIO object at 0x0001>")
+    app.dependency_overrides[get_risk_detector_service] = lambda: mock_service
+
+    resp = await client.post(
+        "/risk-detector/analyze", data=FORM_DATA, files=FILES, headers={"x-user-id": "risk_guard_500_user"},
+    )
+
+    assert resp.status_code == 500
+    assert "BytesIO" not in resp.text and "cannot identify" not in resp.text
+
+
+async def test_analyze_risk_real_service_rejects_non_image_before_vision(client: AsyncClient, monkeypatch):
+    # 서비스까지 진짜로 태운다 — 이미지가 아닌 파일은 Vision 호출 없이 422, 사유는 로그에 남는다
+    import app.api.routers.risk_detector as router_module
+    import app.domain.risk_detector_service as service_module
+
+    async def must_not_call(chunk, client=None):
+        raise AssertionError("Vision이 호출되면 안 된다")
+    monkeypatch.setattr(service_module, "acall_vision_api_with_usage", must_not_call)
+    events: list[tuple[str, dict]] = []
+    monkeypatch.setattr(router_module, "log_event", lambda event, **fields: events.append((event, fields)))
+    app.dependency_overrides[get_risk_detector_service] = lambda: service_module.RiskDetectorService()
+
+    resp = await client.post(
+        "/risk-detector/analyze", data=FORM_DATA, files=[("files", ("a.pdf", b"%PDF-1.4 fake", "application/pdf"))],
+        headers={"x-user-id": "risk_guard_real_user"},
+    )
+
+    assert resp.status_code == 422
+    assert "이미지 파일만" in resp.json()["detail"]
+    assert [fields["reason"] for event, fields in events if event == "input_rejected"] == ["not_an_image"]
+
+
+async def test_analyze_risk_internal_value_error_is_500_not_422(client: AsyncClient):
+    # 입력 검문은 InputRejected로만 막는다. 그 밖의 ValueError(숫자 변환 실패 등)는 서버 쪽 오류라
+    # 사용자 입력 탓(422)으로 돌리지 않고, 예외 글도 응답에 싣지 않는다
+    mock_service = AsyncMock()
+    mock_service.analyze.side_effect = ValueError("invalid literal for int() with base 10: '1,200,000'")
+    app.dependency_overrides[get_risk_detector_service] = lambda: mock_service
+
+    resp = await client.post(
+        "/risk-detector/analyze", data=FORM_DATA, files=FILES, headers={"x-user-id": "risk_guard_valueerror_user"},
+    )
+
+    assert resp.status_code == 500
+    assert "invalid literal" not in resp.text
+
+
+async def test_analyze_risk_oversized_body_returns_413_before_parsing(client: AsyncClient, monkeypatch):
+    import app.main as main_module
+
+    monkeypatch.setattr(main_module, "MAX_REQUEST_BYTES", 1000)
+    mock_service = AsyncMock()
+    app.dependency_overrides[get_risk_detector_service] = lambda: mock_service
+    files = [("files", ("big.png", b"x" * 5000, "image/png"))]
+
+    resp = await client.post(
+        "/risk-detector/analyze", data=FORM_DATA, files=files, headers={"x-user-id": "risk_guard_body_user"},
+    )
+
+    assert resp.status_code == 413
+    mock_service.analyze.assert_not_awaited()

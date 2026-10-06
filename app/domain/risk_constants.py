@@ -1,4 +1,3 @@
-SUPPORTED_SPACE_TYPES = ["아파트", "빌라", "오피스텔", "단독주택"]
 SUPPORTED_PROCESSES = [
     "철거",
     "설비",

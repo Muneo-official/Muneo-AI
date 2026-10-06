@@ -40,6 +40,24 @@ def split_vertically(img: Image.Image) -> list[Image.Image]:
     return chunks
 
 
+def chunk_count(width: int, height: int) -> int:
+    """이 크기의 이미지가 몇 조각으로 나뉘는지 — 이미지를 디코딩하지 않고 헤더의 크기만으로 센다.
+
+    조각 하나가 Vision 호출 한 번이라, 업로드를 받기 전에 호출 수를 미리 세는 데 쓴다
+    (app/domain/risk_input_guard.py). 계산은 resize_for_parse() + split_vertically()와 같아야 한다.
+    """
+    if width > MAX_PARSE_WIDTH:
+        height = int(height * MAX_PARSE_WIDTH / width)
+    if height <= SPLIT_HEIGHT_THRESHOLD:
+        return 1
+    count = 1
+    top = 0
+    while top + CHUNK_HEIGHT < height:
+        top += CHUNK_HEIGHT - CHUNK_OVERLAP
+        count += 1
+    return count
+
+
 def _prepare_chunks(img: Image.Image) -> list[bytes]:
     img = resize_for_parse(img)
     _, h = img.size

@@ -206,16 +206,12 @@ def load_records(split: str) -> list[dict]:
     return records
 
 
-def region_text(info: dict) -> str:
-    """리스크 진단은 지역을 자유 글로 받는다. 정답셋의 "수도권"은 지역 이름이 아니라서 경기로 넘긴다."""
-    return "경기" if info["지역"] == "수도권" else info["지역"]
-
-
 async def run(split: str) -> None:
     from motor.motor_asyncio import AsyncIOMotorClient
 
     from app.core.config import get_settings
     from app.domain.risk_detector_service import RiskDetectorService
+    from app.domain.risk_input_guard import InputRejected
     from app.domain.unit_price_reference import UnitPriceReference, build_quantity_reference, build_reference
     from app.schemas.risk import AnalyzeRiskCommand
     from pipeline.vision_client import RISK_MODEL
@@ -232,9 +228,15 @@ async def run(split: str) -> None:
 
     async def analyze(doc: dict, path) -> list[dict]:
         info = doc["info"]
-        report = await service.analyze(AnalyzeRiskCommand(
-            space_type=info["공간유형"], pyeong=info["평수"], room_count=3, floor=info["층수"], elevator=info["엘리베이터"],
-            region=region_text(info), building_age="10~20년", company_name="", image_files=[path.read_bytes()]))
+        try:
+            report = await service.analyze(AnalyzeRiskCommand(
+                space_type=info["공간유형"], pyeong=info["평수"], room_count=3, floor=info["층수"], elevator=info["엘리베이터"],
+                region=info["지역"], building_age="10~20년", company_name="", image_files=[path.read_bytes()]))
+        except InputRejected as e:
+            # 서비스가 이 판을 막았다(견적서가 아니라고 읽은 경우 등) — 사용자는 리포트를 못 받으므로 지적이 없는
+            # 것으로 채점한다. 여기서 죽으면 앞서 채점한 건까지 저장되지 않는다
+            print(f"[막힘] {path.name}: {e.reason}")
+            return []
         return muneo_findings(report)
 
     rows, details = [], []

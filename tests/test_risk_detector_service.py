@@ -5,6 +5,7 @@ import pytest
 
 import app.domain.risk_detector_service as service_module
 from app.domain.risk_detector_service import RiskDetectorService
+from app.domain.risk_input_guard import InputRejected
 from app.schemas.risk import AnalyzeRiskCommand
 from pipeline.vision_client import VisionCallResult
 
@@ -58,6 +59,8 @@ def _no_real_vision_client(monkeypatch):
     # 실제 PIL 디코딩/리사이즈는 test_pipeline_image_prep.py에서 이미 검증 — 여기선
     # 서비스 배선(파싱 결과 -> 분석 -> 포맷)만 보므로 청크 분할은 통과시키기만 한다.
     monkeypatch.setattr(service_module, "prepare_chunks_from_bytes", lambda raw: [raw])
+    # 업로드 검문(형식·크기)도 tests/test_risk_input_guard.py에서 따로 본다 — 여기 이미지는 가짜 바이트다
+    monkeypatch.setattr(service_module, "check_images", lambda image_files: None)
 
 
 @pytest.mark.asyncio
@@ -70,7 +73,8 @@ async def test_analyze_raises_on_unsupported_space_type():
 
 
 @pytest.mark.asyncio
-async def test_analyze_raises_when_no_images():
+async def test_analyze_raises_when_no_images(monkeypatch):
+    monkeypatch.undo()  # 실제 검문을 태운다
     service = RiskDetectorService()
     command = _command(image_files=[])
 
@@ -80,8 +84,9 @@ async def test_analyze_raises_when_no_images():
 
 @pytest.mark.asyncio
 async def test_analyze_returns_extraction_failure_issue_when_no_line_items(monkeypatch):
+    # 견적서라고는 봤는데 품목을 한 줄도 못 읽은 경우 — 막지 않고 "추출 실패" 리포트로 알린다
     monkeypatch.setattr(
-        service_module, "acall_vision_api_with_usage", _vision_returning({"is_estimate": False})
+        service_module, "acall_vision_api_with_usage", _vision_returning({"is_estimate": True, "line_items": []})
     )
     service = RiskDetectorService()
 
@@ -90,6 +95,81 @@ async def test_analyze_returns_extraction_failure_issue_when_no_line_items(monke
     report = result["report"]
     assert report["summary"]["total_risk_items"] == 1
     assert report["process_sections"][0]["process"] == "견적서"
+
+
+@pytest.mark.asyncio
+async def test_analyze_rejects_images_the_model_says_are_not_estimates(monkeypatch):
+    monkeypatch.setattr(
+        service_module, "acall_vision_api_with_usage", _vision_returning({"is_estimate": False})
+    )
+    service = RiskDetectorService()
+
+    with pytest.raises(InputRejected, match="견적서로 보이지 않는") as excinfo:
+        await service.analyze(_command(image_files=[b"photo-1", b"photo-2"]))
+    assert excinfo.value.reason == "not_an_estimate"
+
+
+@pytest.mark.asyncio
+async def test_analyze_does_not_call_it_a_non_estimate_when_a_chunk_got_no_answer(monkeypatch):
+    # 거부·출력 한도로 답을 못 받은 조각이 있으면 "견적서가 아니다"라고 단정할 근거가 없다
+    async def refused(chunk, client):
+        call = _call_result({"is_estimate": False})
+        call.tool_called = False
+        call.stop_reason = "refusal"
+        return call
+    monkeypatch.setattr(service_module, "acall_vision_api_with_usage", refused)
+    service = RiskDetectorService()
+
+    result = await service.analyze(_command())
+
+    assert result["report"]["process_sections"][0]["process"] == "견적서"
+
+
+@pytest.mark.asyncio
+async def test_analyze_rejects_bad_form_values_before_any_vision_call(monkeypatch):
+    called = []
+
+    async def fake(chunk, client):
+        called.append(chunk)
+        return _call_result(_ONE_ITEM_RESULT)
+    monkeypatch.setattr(service_module, "acall_vision_api_with_usage", fake)
+    service = RiskDetectorService()
+
+    with pytest.raises(InputRejected):
+        await service.analyze(_command(pyeong=99999))
+    assert called == []
+
+
+@pytest.mark.asyncio
+async def test_analyze_rejects_an_image_that_fails_to_decode_before_any_vision_call(monkeypatch):
+    called = []
+
+    async def fake(chunk, client):
+        called.append(chunk)
+        return _call_result(_ONE_ITEM_RESULT)
+
+    def broken(raw):
+        if raw == b"truncated":
+            raise OSError("image file is truncated")
+        return [raw]
+    monkeypatch.setattr(service_module, "acall_vision_api_with_usage", fake)
+    monkeypatch.setattr(service_module, "prepare_chunks_from_bytes", broken)
+    service = RiskDetectorService()
+
+    with pytest.raises(InputRejected) as excinfo:
+        await service.analyze(_command(image_files=[b"fine", b"truncated"]))
+    assert excinfo.value.reason == "broken_image"
+    assert called == []
+
+
+@pytest.mark.asyncio
+async def test_analyze_normalizes_building_age_spelling(monkeypatch):
+    monkeypatch.setattr(service_module, "acall_vision_api_with_usage", _vision_returning(_ONE_ITEM_RESULT))
+    service = RiskDetectorService()
+
+    result = await service.analyze(_command(building_age="20년 이상"))
+
+    assert result["report"]["construction_info"]["building_age"] == "20년이상"
 
 
 @pytest.mark.asyncio
@@ -163,9 +243,12 @@ async def test_analyze_logs_timing_even_when_no_line_items(monkeypatch):
     monkeypatch.setattr(service_module, "log_event", lambda event, **fields: events.append((event, fields)))
     service = RiskDetectorService()
 
-    await service.analyze(_command())
+    # 견적서가 아니라서 막은 요청도 Vision 비용은 들었으니 계측 로그는 남아야 한다
+    with pytest.raises(InputRejected):
+        await service.analyze(_command())
 
     [timing] = [f for e, f in events if e == "risk_analyze_timing"]
+    assert timing["not_an_estimate"] is True
     assert timing["line_item_count"] == 0
     assert timing["rule_analyze_s"] == 0.0
     assert timing["price_check_s"] == 0.0
@@ -481,8 +564,9 @@ async def test_empty_parse_result_is_not_cached(monkeypatch):
     cache = _FakeParseCache()
     service = RiskDetectorService(parse_cache=cache)
 
-    await service.analyze(_command())
-    await service.analyze(_command())
+    for _ in range(2):
+        with pytest.raises(InputRejected):
+            await service.analyze(_command())
 
     assert cache.store == {}
     assert len(calls) == 2  # 일시적 실패일 수 있으니 다시 올리면 다시 파싱
@@ -618,3 +702,29 @@ async def test_겹친_줄이_없으면_소계_행을_그대로_둔다():
     items, _, _ = await service._parse_images([b"page-1", b"page-2"])
 
     assert [i["description"] for i in items].count("소계") == 2
+
+
+@pytest.mark.asyncio
+async def test_images_are_decoded_at_most_two_at_a_time_across_requests(monkeypatch):
+    # 디코딩은 장당 수백 MB까지 쓸 수 있다 — 요청이 겹쳐도 동시에 푸는 장수가 묶여야 한다
+    import threading
+
+    lock = threading.Lock()
+    active = peak = 0
+
+    def slow_prepare(raw):
+        nonlocal active, peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+        time.sleep(0.05)
+        with lock:
+            active -= 1
+        return [raw]
+    monkeypatch.setattr(service_module, "prepare_chunks_from_bytes", slow_prepare)
+    monkeypatch.setattr(service_module, "acall_vision_api_with_usage", _vision_returning(_ONE_ITEM_RESULT))
+    service = RiskDetectorService()
+
+    await asyncio.gather(*(service.analyze(_command(image_files=[f"img-{i}".encode()])) for i in range(6)))
+
+    assert peak == 2
