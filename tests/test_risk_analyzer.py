@@ -199,3 +199,13 @@ def test_무상이거나_고객이_따로_사는_줄은_총액에서_빠진_비�
 def test_금액이_숫자가_아닌_줄이_있어도_소계_검산이_죽지_않는다():
     items = [_subtotal("도배", 900_000), _item("도배", "실크벽지", 900_000), {"category": "도배", "description": "풀", "amount": "<UNKNOWN>"}]
     assert [i for i in _issues(items) if "소계" in i.title] == []
+
+
+
+def test_뒤에_설명이_붙은_소계도_그_구분의_소계로_검산한다():
+    # 실제 사례: 도배 소계가 "소 계 (확장, 가벽 포함)"으로 읽혀 소계로 안 잡히자, 도배 품목이 바닥 소계 밑으로 들어가
+    # "바닥 소계 1,699,000원인데 품목을 더하면 5,398,000원"이 나왔다. 도배 소계는 도배 품목과 대어 봐야 한다
+    items = [_subtotal("바닥", 1_699_000), _item("바닥", "우드륨", 1_699_000),
+             {"category": "도배", "description": "소 계 (확장, 가벽 포함)", "amount": 3_354_000, "unit_price": 0},
+             _item("도배", "실크벽지", 3_000_000)]
+    assert [i.process for i in _issues(items) if i.title == "소계가 품목 합과 다름"] == ["도배"]

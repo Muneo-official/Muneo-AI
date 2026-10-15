@@ -73,7 +73,8 @@ def _quantity(item: dict[str, Any]) -> float:
 
 
 def _is_subtotal(item: dict[str, Any]) -> bool:
-    return _normalize_text(item.get("description")) == "소계"
+    # "소 계 (확장포함)"처럼 뒤에 설명이 붙은 소계도 있다(pipeline.parsing.is_subtotal_row와 같은 판정)
+    return _normalize_text(item.get("description")).startswith("소계")
 
 
 def _is_generic_line(description: str) -> bool:
