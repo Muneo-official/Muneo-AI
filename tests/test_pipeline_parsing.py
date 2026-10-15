@@ -150,3 +150,80 @@ def test_코드가_없는_행은_공종이_다르면_같은_금액이어도_합�
     items = [{"category": "목공", "description": "인건비", "amount": 300_000, "unit_price": 300_000},
              {"category": "타일", "description": "인건비", "amount": 300_000, "unit_price": 300_000}]
     assert [i["category"] for i in merge_chunk_results([_chunk(items)])["line_items"]] == ["목공", "타일"]
+
+
+def _rows(merged: dict) -> list[str]:
+    return [i["description"] for i in merged["line_items"]]
+
+
+def test_같은_청크_안에서_앞_글자와_금액이_같은_두_줄은_둘_다_남는다():
+    # 실제 사례: 전기 소계 860,000원 견적서에서 "LED 다운라이트 주방"이 "거실"과 한 줄로 합쳐져 빠졌고,
+    # 리스크 진단이 "품목을 더하면 815,000원"이라고 맞는 소계를 지적했다
+    from pipeline.parsing import merge_chunk_results
+
+    items = [
+        {"category": "전기", "description": "소계", "amount": 860_000, "unit_price": 0},
+        {"category": "전기", "description": "LED 다운라이트 거실", "amount": 45_000, "unit_price": 15_000},
+        {"category": "전기", "description": "LED 다운라이트 주방", "amount": 45_000, "unit_price": 15_000},
+        {"category": "전기", "description": "콘센트·스위치 교체", "amount": 770_000, "unit_price": 770_000},
+    ]
+    merged = merge_chunk_results([_chunk(items)], for_risk=True)
+    assert _rows(merged) == ["소계", "LED 다운라이트 거실", "LED 다운라이트 주방", "콘센트·스위치 교체"]
+
+
+def test_겹친_구간에서_다시_읽힌_줄만_빠지고_앞뒤_줄은_남는다():
+    from pipeline.parsing import merge_chunk_results
+
+    a = {"category": "도배", "description": "실크벽지", "amount": 900_000, "unit_price": 9_000}
+    b = {"category": "도배", "description": "도배 인건비", "amount": 500_000, "unit_price": 250_000}
+    c = {"category": "타일", "description": "욕실 벽타일", "amount": 700_000, "unit_price": 35_000}
+    assert _rows(merge_chunk_results([_chunk([a, b]), _chunk([dict(b), c])])) == ["실크벽지", "도배 인건비", "욕실 벽타일"]
+
+
+def test_견적서에_두_번_적힌_줄이_겹친_구간에서_한_번_더_읽혀도_두_줄이_남는다():
+    from pipeline.parsing import merge_chunk_results
+
+    row = {"category": "전기", "description": "LED 매입등", "amount": 45_000, "unit_price": 15_000}
+    merged = merge_chunk_results([_chunk([row, dict(row)]), _chunk([dict(row)])])
+    assert len(merged["line_items"]) == 2
+
+
+def test_이웃하지_않은_청크의_같은_열쇠_줄은_겹친_것이_아니다():
+    # 겹침은 바로 앞 청크와만 생긴다. 첫 청크와 셋째 청크에 각각 있는 줄은 서로 다른 줄이다
+    from pipeline.parsing import merge_chunk_results
+
+    row = {"category": "전기", "description": "LED 매입등", "amount": 45_000, "unit_price": 15_000}
+    other = {"category": "도배", "description": "실크벽지", "amount": 900_000, "unit_price": 9_000}
+    merged = merge_chunk_results([_chunk([row]), _chunk([other]), _chunk([dict(row)])])
+    assert _rows(merged) == ["LED 매입등", "실크벽지", "LED 매입등"]
+
+
+def test_겹친_구간의_줄이_다음_청크에서_다른_공종과_품명으로_읽혀도_위치로_맞춰_뺀다():
+    # 실제 사례(docs/samples/test_견적서.png): 다음 청크에서는 구분 이름이 잘려 가구 줄을 "확장"으로, "소계"를
+    # "소 계 (확장포함)"로 읽었다. 공종이 달라 열쇠로는 안 걸러져 가구 345,000원이 바닥 소계 밑에 붙었다
+    from pipeline.parsing import merge_chunk_results
+
+    def row(category, description, amount, unit_price):
+        return {"code": "", "category": category, "description": description, "amount": amount, "unit_price": unit_price}
+
+    chunk1 = [row("가구", "소계", 3_805_000, 0), row("가구", "시공인건비", 300_000, 300_000),
+              row("가구", "식대", 15_000, 15_000), row("가구", "운송비", 30_000, 30_000),
+              row("바닥", "소계", 1_699_000, 0), row("바닥", "우드륨 2.2t", 1_334_000, 58_000)]
+    chunk2 = [row("확장", "시공인건비", 300_000, 300_000), row("확장", "식대", 15_000, 15_000),
+              row("확장", "운송비", 30_000, 30_000), row("바닥", "소 계 (확장포함)", 1_699_000, 0),
+              row("바닥", "우드륨 2.2t", 1_334_000, 58_000), row("바닥", "인건비", 280_000, 280_000),
+              row("바닥", "식대", 15_000, 15_000)]
+    merged = merge_chunk_results([_chunk(chunk1), _chunk(chunk2)], for_risk=True)
+    assert [(i["category"], i["description"]) for i in merged["line_items"]] == [
+        ("가구", "소계"), ("가구", "시공인건비"), ("가구", "식대"), ("가구", "운송비"),
+        ("바닥", "소계"), ("바닥", "우드륨 2.2t"), ("바닥", "인건비"), ("바닥", "식대"),
+    ]
+
+
+def test_뒤에_설명이_붙은_소계도_소계_행으로_남는다():
+    from pipeline.parsing import is_subtotal_row, merge_chunk_results
+
+    items = [{"code": "1400", "category": "도배", "description": "소 계 (확장, 가벽 포함)", "amount": 3_354_000, "unit_price": 0},
+             {"code": "", "category": "도배", "description": "실크벽지", "amount": 3_354_000, "unit_price": 10_000}]
+    risk = merge_chunk_results([_chunk(items)], for_risk=True)["line_items"]
+    assert [is_subtotal_row(i) for i in risk] == [True, False]

@@ -134,7 +134,9 @@ def _risk_parse_version() -> str:
     return hashlib.sha256(json.dumps(spec, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()[:16]
 
 
-_PARSE_LOGIC_REVISION = 2  # 2: 청크 중복 열쇠에서 공종을 뺌, 소계 행과 금액 없는 행을 남김
+# 2: 청크 중복 열쇠에서 공종을 뺌, 소계 행과 금액 없는 행을 남김
+# 3: 같은 청크 안의 줄을 지우지 않음, 바로 앞 청크와 겹친 줄을 위치로 맞춰 지움, "소 계 (…)"도 소계로 봄
+_PARSE_LOGIC_REVISION = 3
 
 
 def _build_image_params(image_bytes: bytes, tool: dict, model: str = MODEL, instructions: str = TOOL_USE_INSTRUCTIONS) -> dict:
