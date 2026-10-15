@@ -209,3 +209,14 @@ def test_뒤에_설명이_붙은_소계도_그_구분의_소계로_검산한다(
              {"category": "도배", "description": "소 계 (확장, 가벽 포함)", "amount": 3_354_000, "unit_price": 0},
              _item("도배", "실크벽지", 3_000_000)]
     assert [i.process for i in _issues(items) if i.title == "소계가 품목 합과 다름"] == ["도배"]
+
+
+
+def test_뒤에_설명이_붙은_소계는_품목으로_세지_않는다():
+    # 소계 행이 품목으로 세지면 도배가 "일체" 한 줄뿐이어도 두 줄로 보여 일괄 금액 지적이 빠지고,
+    # 소계 행의 "별도" 같은 낱말에 모호 표현 지적이 붙는다
+    items = [{"category": "도배", "description": "소 계 (확장 별도)", "amount": 3_354_000, "unit_price": 0},
+             _item("도배", "도배 공사 일체", 3_354_000)]
+    titles = [i.title for i in _issues(items)]
+    assert "세부 내역 없이 일괄 금액" in titles
+    assert "모호한 표현 포함" not in titles
