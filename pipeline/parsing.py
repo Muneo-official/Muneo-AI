@@ -9,7 +9,7 @@ pipeline/reference/parse_estimates.py의 순수 로직(이미지 다운로드·�
 문제가 생기자마자 드러나게 한다.
 """
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import asdict
 
 from pipeline.validators import validate_case
@@ -76,12 +76,64 @@ def _chunk_dedup_key(item: dict) -> tuple:
     return (item.get("category", ""), amt, unit_p, desc_pre)
 
 
+def _row_key(item: dict) -> tuple:
+    if item.get("amount"):
+        return _chunk_dedup_key(item)
+    return ("금액 없음", item.get("code", ""), item.get("description", ""))
+
+
+def _aligned_overlap(previous_rows: list[dict], rows: list[dict]) -> int:
+    """앞 청크의 끝 k줄과 이 청크의 앞 k줄이 금액·단가가 차례로 같은 가장 긴 k(없으면 0).
+
+    겹친 구간은 앞 청크의 맨 끝, 다음 청크의 맨 앞에 나온다. 그 줄들은 공종이나 품명이 청크마다 다르게 읽힐 수
+    있다 — 다음 청크에서는 구분 이름이 잘려 보이지 않아 가구 줄을 "확장"으로 읽고, "소계"를 "소 계 (확장포함)"로
+    옮긴다. 그래서 위치와 금액·단가로 맞춘다. 경계에서 잘린 줄은 한쪽에만 나오지만 바깥 끝에 있어 맞추기를 깨지 않는다.
+    """
+    def key(item: dict) -> tuple:
+        amount = _safe_int(item.get("amount"))
+        if not amount:
+            return ("금액 없음", (item.get("description") or "").replace(" ", ""))
+        return (amount, _safe_int(item.get("unit_price")))
+
+    for k in range(min(len(previous_rows), len(rows)), 0, -1):
+        if [key(i) for i in previous_rows[-k:]] == [key(i) for i in rows[:k]]:
+            return k
+    return 0
+
+
+def _drop_overlap(previous_rows: list[dict], rows: list[dict]) -> list[dict]:
+    """이 청크의 줄 중 바로 앞 청크와 겹친 구간에서 다시 읽힌 줄을 뺀다.
+
+    위치로 맞으면(_aligned_overlap) 앞 k줄을 뺀다. 한 줄만 맞는 것은 우연일 수 있어 두 줄 이상일 때만 믿는다(겹침
+    200px에는 보통 대여섯 줄이 들어간다). 위치로 안 맞으면(한쪽 청크에서 금액을 잘못 읽은 경우 등) 열쇠로 가린다 —
+    열쇠가 같은 줄이 앞 청크에 n번 있었으면 이 청크의 처음 n번을 뺀다.
+
+    어느 쪽이든 같은 청크 안의 줄끼리는 지우지 않는다. 예전에는 지워서 "식대 15,000"처럼 공종·금액·단가·품명 앞
+    4글자가 같은 전기공사 줄과 조명공사 줄이 한 줄로 합쳐졌고, 리스크 진단이 맞는 소계를 "품목 합과 다름"으로 지적했다.
+    """
+    overlap = _aligned_overlap(previous_rows, rows)
+    if overlap >= 2:
+        return rows[overlap:]
+    in_previous = Counter(_row_key(i) for i in previous_rows)
+    in_this: Counter = Counter()
+    kept = []
+    for item in rows:
+        in_this[_row_key(item)] += 1
+        if in_this[_row_key(item)] > in_previous[_row_key(item)]:
+            kept.append(item)
+    return kept
+
+
 _AGGREGATE_KEYWORDS = {"합계", "소계", "총계", "공사비합계", "공사합계", "계", "합 계", "소 계"}
 
 
 def is_subtotal_row(item: dict) -> bool:
-    """리스크 진단의 파싱이 품목과 함께 내는 소계 행인지(지시문이 description을 정확히 "소계"로 적게 한다)."""
-    return (item.get("description") or "").replace(" ", "") == "소계"
+    """리스크 진단의 파싱이 품목과 함께 내는 소계 행인지.
+
+    지시문은 description을 "소계"로 적게 하지만, 모델이 "소 계 (확장, 가벽 포함)"처럼 견적서에 적힌 그대로 옮기는
+    일이 있다. 정확히 "소계"만 보면 그 행이 집계 행으로 지워져, 그 구분의 품목이 앞 구분의 소계 밑으로 들어간다.
+    """
+    return (item.get("description") or "").replace(" ", "").startswith("소계")
 
 
 def _remove_aggregate_items(line_items: list[dict], total_cost: int = 0, keep_subtotals: bool = False) -> list[dict]:
@@ -168,29 +220,31 @@ def merge_chunk_results(chunk_results: list[dict], for_risk: bool = False) -> di
 
     merge_parsed_results()는 서로 다른 이미지(페이지)를 합치는 함수라 총금액이 다르면
     "독립된 견적서가 섞였다"고 판단해 하나만 골라버린다 — 청크는 애초에 같은 이미지의
-    일부라 그 판단이 적용되면 안 된다. 대신 청크마다 나온 (code, amount, unit_price)
-    조합으로 중복만 제거하고, total_cost는 청크 중 가장 큰 값(합계 행이 찍힌 청크)을 쓴다.
+    일부라 그 판단이 적용되면 안 된다. 대신 청크가 겹친 구간에서 두 번 읽힌 줄만 지우고,
+    total_cost는 청크 중 가장 큰 값(합계 행이 찍힌 청크)을 쓴다.
+
+    겹친 구간은 바로 앞 청크와만 생기므로 각 청크를 바로 앞 청크와만 대 본다(_drop_overlap).
 
     for_risk: 리스크 진단용. 금액이 없는 행("별도", "협의")과 소계 행을 버리지 않는다 — 앞의 것은 총액에 들어가지
     않은 비용이고, 뒤의 것은 소계 검산에 쓴다. 수집(코퍼스)에서는 둘 다 버린다.
     """
-    seen = set()
+    previous_rows: list[dict] = []
     all_items = []
     max_total = 0
 
     for r in chunk_results:
         if not r.get("is_estimate"):
+            previous_rows = []  # 앞뒤 청크가 이어지지 않으므로 겹친 구간도 없다
             continue
         total = _safe_int(r.get("total_cost"))
         if total > max_total:
             max_total = total
-        for item in r.get("line_items", []):
-            if not item.get("amount") and not (for_risk and (item.get("description") or "").strip()):
-                continue
-            key = _chunk_dedup_key(item) if item.get("amount") else ("금액 없음", item.get("code", ""), item.get("description", ""))
-            if key not in seen:
-                seen.add(key)
-                all_items.append(item)
+        rows = [
+            item for item in r.get("line_items", [])
+            if item.get("amount") or (for_risk and (item.get("description") or "").strip())
+        ]
+        all_items.extend(_drop_overlap(previous_rows, rows))
+        previous_rows = rows
 
     if not all_items:
         return {"is_estimate": False}

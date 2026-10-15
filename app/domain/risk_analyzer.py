@@ -73,7 +73,8 @@ def _quantity(item: dict[str, Any]) -> float:
 
 
 def _is_subtotal(item: dict[str, Any]) -> bool:
-    return _normalize_text(item.get("description")) == "소계"
+    # "소 계 (확장포함)"처럼 뒤에 설명이 붙은 소계도 있다(pipeline.parsing.is_subtotal_row와 같은 판정)
+    return _normalize_text(item.get("description")).startswith("소계")
 
 
 def _is_generic_line(description: str) -> bool:
@@ -84,7 +85,9 @@ def _is_aggregate_item(item: dict[str, Any]) -> bool:
     desc = _normalize_text(item.get("description"))
     if not desc:
         return False
-    if desc in AGGREGATE_KEYWORDS:
+    # "소 계 (확장포함)"처럼 뒤에 설명이 붙은 소계도 집계 행이다 — 품목으로 세면 그 공종의 품목 수·중복·모호 표현
+    # 판정에 소계가 끼어든다
+    if desc in AGGREGATE_KEYWORDS or _is_subtotal(item):
         return True
     return desc.endswith("소계") or desc.endswith("합계") or desc.endswith("총계")
 
