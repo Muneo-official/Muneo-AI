@@ -191,10 +191,14 @@ async def test_analyze_runs_rule_based_analysis_on_parsed_items(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_analyze_dedupes_identical_items_across_multiple_images(monkeypatch):
+    # 내용이 같은 두 장(같은 화면을 다시 찍은 것) — 2쪽 전체가 1쪽과 겹친다
+    two_items = {**_ONE_ITEM_RESULT, "line_items": _ONE_ITEM_RESULT["line_items"] + [
+        {"category": "도배공사", "description": "부자재", "amount": 100_000, "unit_price": 100_000}
+    ]}
     monkeypatch.setattr(
         service_module,
         "acall_vision_api_with_usage",
-        _vision_returning(_ONE_ITEM_RESULT),
+        _vision_returning(two_items),
     )
     service = RiskDetectorService()
     command = _command(image_files=[b"page-1", b"page-2"])
@@ -203,7 +207,7 @@ async def test_analyze_dedupes_identical_items_across_multiple_images(monkeypatc
 
     sections = result["report"]["process_sections"]
     normal_items = [item for s in sections for item in s["items"] if item["status"] == "정상"]
-    assert len(normal_items) == 1
+    assert len(normal_items) == 2
 
 
 @pytest.mark.asyncio
@@ -255,7 +259,8 @@ async def test_analyze_logs_timing_even_when_no_line_items(monkeypatch):
 
 
 def _item(desc: str) -> dict:
-    return {"category": "도배", "description": desc, "amount": 1_000_000}
+    # 금액을 줄마다 다르게 둔다 — 같으면 다음 쪽과 위치가 맞아 겹친 줄로 빠진다
+    return {"category": "도배", "description": desc, "amount": 1_000_000 + sum(desc.encode())}
 
 
 @pytest.mark.asyncio
@@ -678,18 +683,46 @@ class _TwoPageCache:
         pass
 
 
-async def test_앞_쪽과_겹쳐서_줄을_뺐으면_소계_검산을_하지_않는다():
-    # 1쪽과 2쪽에 같은 "양변기 300,000"이 있으면 2쪽 것이 빠진다. 그 상태로 2쪽의 소계를 검산하면 맞는 견적서에
-    # 계산 오류를 지적하게 된다
-    toilet = {"code": "", "category": "욕실", "description": "양변기", "amount": 300_000, "unit_price": 300_000}
-    page1 = [toilet, {"code": "", "category": "욕실", "description": "소계", "amount": 300_000, "unit_price": 0}]
-    page2 = [dict(toilet), {"code": "", "category": "욕실", "description": "세면기", "amount": 200_000, "unit_price": 200_000},
-             {"code": "", "category": "욕실", "description": "소계", "amount": 500_000, "unit_price": 0}]
+def _row(category, description, amount, unit_price=None):
+    return {"code": "", "category": category, "description": description, "amount": amount,
+            "unit_price": amount if unit_price is None else unit_price}
+
+
+async def test_장마다_같은_줄이_있어도_겹친_것이_아니면_지우지_않는다():
+    # 1쪽과 2쪽에 같은 "양변기 300,000"이 있어도 페이지가 겹친 것이 아니다(욕실이 둘). 예전에는 2쪽 것을 지우고
+    # 소계 행까지 버려 소계 검산이 꺼졌다
+    page1 = [_row("욕실", "양변기", 300_000), _row("욕실", "소계", 300_000, 0)]
+    page2 = [_row("욕실", "양변기", 300_000), _row("욕실", "세면기", 200_000), _row("욕실", "소계", 500_000, 0)]
     service = RiskDetectorService(parse_cache=_TwoPageCache([page1, page2]))
 
     items, _, _ = await service._parse_images([b"page-1", b"page-2"])
 
-    assert [i["description"] for i in items] == ["양변기", "세면기"]
+    assert [i["description"] for i in items] == ["양변기", "소계", "양변기", "세면기", "소계"]
+
+
+async def test_페이지가_겹쳐_다시_나온_줄만_뺀다():
+    # 화면을 내려 가며 찍으면 앞 장의 끝 몇 줄이 다음 장 맨 위에 다시 나온다
+    page1 = [_row("도배", "실크벽지", 900_000), _row("도배", "부자재", 100_000), _row("도배", "소계", 1_000_000, 0)]
+    page2 = [_row("도배", "부자재", 100_000), _row("도배", "소 계", 1_000_000, 0),
+             _row("바닥", "강마루", 3_000_000, 125_000), _row("바닥", "소계", 3_000_000, 0)]
+    service = RiskDetectorService(parse_cache=_TwoPageCache([page1, page2]))
+
+    items, _, _ = await service._parse_images([b"page-1", b"page-2"])
+
+    assert [i["description"] for i in items] == ["실크벽지", "부자재", "소계", "강마루", "소계"]
+
+
+async def test_여러_장에서도_틀린_소계를_지적한다():
+    # 전기공사와 조명공사가 둘 다 "전기"로 읽혀 두 장에 같은 "인건비 300,000"이 있다. 예전에는 2쪽 인건비를 지우고
+    # 소계 검산을 꺼서, 2쪽의 틀린 소계(700,000이 맞다)를 못 잡았다
+    page1 = [_row("전기", "콘센트 교체", 200_000), _row("전기", "인건비", 300_000), _row("전기", "소계", 500_000, 0)]
+    page2 = [_row("전기", "등기구", 400_000), _row("전기", "인건비", 300_000), _row("전기", "소계", 650_000, 0)]
+    service = RiskDetectorService(parse_cache=_TwoPageCache([page1, page2]))
+
+    result = await service.analyze(_command(image_files=[b"page-1", b"page-2"]))
+
+    titles = [i["title"] for s in result["report"]["process_sections"] for i in s["items"]]
+    assert "소계가 품목 합과 다름" in titles, result["report"]
 
 
 async def test_겹친_줄이_없으면_소계_행을_그대로_둔다():

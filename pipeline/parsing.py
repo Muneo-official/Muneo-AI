@@ -124,6 +124,17 @@ def _drop_overlap(previous_rows: list[dict], rows: list[dict]) -> list[dict]:
     return kept
 
 
+def drop_page_overlap(previous_page: list[dict], page: list[dict]) -> list[dict]:
+    """다음 쪽 이미지의 줄 중 앞 쪽과 겹쳐 찍혀 다시 나온 줄을 뺀다(리스크 진단에서 견적서를 여러 장으로 올린 경우).
+
+    청크와 달리 쪽 사이에는 겹침이 있다는 보장이 없다. 그래서 위치로 맞을 때(_aligned_overlap)만 빼고, 열쇠로
+    가리지 않는다 — 열쇠로 가리면 "인건비 300,000"처럼 공종마다 반복되는 줄이 쪽마다 지워진다. 위치 맞추기는 금액·
+    단가만 보므로 한 줄만 맞는 것은 우연일 수 있어, 청크처럼 두 줄 이상일 때만 믿는다.
+    """
+    overlap = _aligned_overlap(previous_page, page)
+    return page[overlap:] if overlap >= 2 else page
+
+
 _AGGREGATE_KEYWORDS = {"합계", "소계", "총계", "공사비합계", "공사합계", "계", "합 계", "소 계"}
 
 
