@@ -28,7 +28,7 @@ from app.domain.unit_price_reference import UnitPriceReference
 from app.repositories.risk_parse_cache_repository import CachedParse, RiskParseCacheRepository
 from app.schemas.risk import AnalyzeRiskCommand
 from pipeline.image_prep import prepare_chunks_from_bytes
-from pipeline.parsing import is_subtotal_row, merge_chunk_results
+from pipeline.parsing import drop_page_overlap, merge_chunk_results
 from pipeline.vision_client import (
     RISK_PARSE_VERSION,
     VisionCallResult,
@@ -207,17 +207,13 @@ class RiskDetectorService:
         ))
         store_s = time.perf_counter() - put_started
 
+        # 이미지는 같은 견적서의 쪽들로 보고 올린 순서대로 잇는다. 같은 이미지를 두 번 올린 것은 한 번만 넣는다
         all_items: list[dict[str, Any]] = []
-        dropped = 0
-        for key in keys:
-            line_items = cached[key].line_items if key in cached else parsed[key][0]
-            merged = self._merge_across_images(all_items, line_items)
-            dropped += len(line_items) - len(merged)
-            all_items.extend(merged)
-        if dropped:
-            # 앞 이미지와 겹친다고 본 줄을 뺐으면 소계의 품목이 온전하지 않다(1쪽과 2쪽에 같은 "양변기 300,000"이
-            # 있으면 2쪽 것이 빠진다). 그 상태로 검산하면 맞는 견적서에 계산 오류를 지적하게 되므로 소계 행을 뺀다
-            all_items = [item for item in all_items if not is_subtotal_row(item)]
+        previous_page: list[dict[str, Any]] = []
+        for key in dict.fromkeys(keys):
+            page = cached[key].line_items if key in cached else parsed[key][0]
+            all_items.extend(drop_page_overlap(previous_page, page))
+            previous_page = page
 
         hits = [key for key in keys if key in cached]
         cache_log = {
@@ -332,26 +328,6 @@ class RiskDetectorService:
             served_model=call.model,
         )
         return call
-
-    def _merge_across_images(
-        self, already_collected: list[dict[str, Any]], new_items: list[dict[str, Any]]
-    ) -> list[dict[str, Any]]:
-        """여러 장의 이미지(같은 견적서의 여러 페이지)에서 나온 항목을 합치며, 앞 이미지에 이미 있던 줄은 뺀다.
-
-        pipeline.parsing.merge_chunk_results()는 한 이미지 내 청크 병합용이라 이미지 간
-        병합엔 안 맞는다(원본 risk_detector/service.py의 자체 dedup 로직 그대로 이관).
-
-        같은 이미지 안에서 똑같은 줄이 두 번 나오면 둘 다 남긴다. 견적서에 같은 줄이 두 번 적힌 것이고, 그것이
-        중복 지적의 대상이다 — 예전에는 여기서 한 줄을 지워서 중복 규칙이 볼 때는 이미 한 줄뿐이었다.
-        """
-        seen = {
-            (i.get("category", ""), i.get("description", ""), int(i.get("amount") or 0))
-            for i in already_collected
-        }
-        return [
-            item for item in new_items
-            if (item.get("category", ""), item.get("description", ""), int(item.get("amount") or 0)) not in seen
-        ]
 
     async def _decode(self, raw: bytes) -> list[bytes]:
         async with self._decode_slots:
