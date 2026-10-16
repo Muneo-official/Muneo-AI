@@ -191,14 +191,10 @@ async def test_analyze_runs_rule_based_analysis_on_parsed_items(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_analyze_dedupes_identical_items_across_multiple_images(monkeypatch):
-    # 내용이 같은 두 장(같은 화면을 다시 찍은 것) — 2쪽 전체가 1쪽과 겹친다
-    two_items = {**_ONE_ITEM_RESULT, "line_items": _ONE_ITEM_RESULT["line_items"] + [
-        {"category": "도배공사", "description": "부자재", "amount": 100_000, "unit_price": 100_000}
-    ]}
     monkeypatch.setattr(
         service_module,
         "acall_vision_api_with_usage",
-        _vision_returning(two_items),
+        _vision_returning(_ONE_ITEM_RESULT),
     )
     service = RiskDetectorService()
     command = _command(image_files=[b"page-1", b"page-2"])
@@ -207,7 +203,7 @@ async def test_analyze_dedupes_identical_items_across_multiple_images(monkeypatc
 
     sections = result["report"]["process_sections"]
     normal_items = [item for s in sections for item in s["items"] if item["status"] == "정상"]
-    assert len(normal_items) == 2
+    assert len(normal_items) == 1
 
 
 @pytest.mark.asyncio
@@ -259,8 +255,7 @@ async def test_analyze_logs_timing_even_when_no_line_items(monkeypatch):
 
 
 def _item(desc: str) -> dict:
-    # 금액을 줄마다 다르게 둔다 — 같으면 다음 쪽과 위치가 맞아 겹친 줄로 빠진다
-    return {"category": "도배", "description": desc, "amount": 1_000_000 + sum(desc.encode())}
+    return {"category": "도배", "description": desc, "amount": 1_000_000}
 
 
 @pytest.mark.asyncio

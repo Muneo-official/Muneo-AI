@@ -227,3 +227,41 @@ def test_뒤에_설명이_붙은_소계도_소계_행으로_남는다():
              {"code": "", "category": "도배", "description": "실크벽지", "amount": 3_354_000, "unit_price": 10_000}]
     risk = merge_chunk_results([_chunk(items)], for_risk=True)["line_items"]
     assert [is_subtotal_row(i) for i in risk] == [True, False]
+
+
+# ── 여러 장(쪽) 사이의 겹침 ──────────────────────────────────────────────
+
+
+def test_쪽_사이에_한_줄만_겹쳐도_뺀다():
+    from pipeline.parsing import drop_page_overlap
+    previous = [_item("도배", "실크벽지", 900_000), _item("도배", "초배지", 100_000)]
+    page = [_item("도배", "초배지", 100_000), _item("도배", "소계", 1_000_000)]
+    assert drop_page_overlap(previous, page) == page[1:]
+
+
+def test_쪽_사이에_금액만_우연히_같은_다른_줄은_빼지_않는다():
+    from pipeline.parsing import drop_page_overlap
+    previous = [_item("목공", "몰딩", 500_000), _item("목공", "공과잡비", 1_000_000)]
+    page = [_item("철거", "철거", 500_000), _item("철거", "폐기물처리", 1_000_000), _item("철거", "소계", 1_500_000)]
+    assert drop_page_overlap(previous, page) == page
+
+
+def test_겹치지_않은_쪽의_같은_줄은_빼지_않는다():
+    # 공종마다 반복되는 "인건비 300,000"이 두 쪽에 있어도 앞 쪽의 끝이 아니면 겹친 것이 아니다
+    from pipeline.parsing import drop_page_overlap
+    previous = [_item("전기", "인건비", 300_000), _item("전기", "소계", 500_000)]
+    page = [_item("전기", "등기구", 400_000), _item("전기", "인건비", 300_000), _item("전기", "소계", 700_000)]
+    assert drop_page_overlap(previous, page) == page
+
+
+def test_겹친_줄은_공종과_소계_표기가_달리_읽혀도_뺀다():
+    from pipeline.parsing import drop_page_overlap
+    previous = [_item("가구", "신발장", 345_000), _item("가구", "소계", 1_345_000)]
+    page = [_item("확장", "신발장", 345_000), _item("확장", "소 계 (확장포함)", 1_345_000), _item("확장", "창호", 2_000_000)]
+    assert drop_page_overlap(previous, page) == page[2:]
+
+
+def test_첫_쪽은_그대로_둔다():
+    from pipeline.parsing import drop_page_overlap
+    page = [_item("도배", "실크벽지", 900_000)]
+    assert drop_page_overlap([], page) == page
