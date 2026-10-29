@@ -31,13 +31,27 @@ def test_폐기물_처리는_다른_공종에_적혀_있어도_된다():
     assert _issues([_item("철거", "바닥 철거"), _item("공과잡비", "공사 폐기물처리")], "누락") == []
 
 
-def test_욕실_타일을_하는데_방수가_없으면_누락이다():
-    issues = _issues([_item("타일", "화장실 벽타일/300*600"), _item("타일", "인건비")], "누락")
+def test_욕실_타일을_뜯는데_방수가_없으면_누락이다():
+    issues = _issues([_item("철거", "욕실 철거(타일까지)"), _item("철거", "폐기물 처리"), _item("타일", "화장실 벽타일/300*600"), _item("타일", "인건비")], "누락")
     assert [i.process for i in issues] == ["욕실"] and "방수" in issues[0].detail
 
 
 def test_방수는_기타공사에_적혀_있어도_된다():
-    assert _issues([_item("타일", "욕실 바닥타일"), _item("공과잡비", "화장실 방수공사")], "누락") == []
+    items = [_item("철거", "욕실 벽타일 철거"), _item("철거", "폐기물 처리"), _item("타일", "욕실 바닥타일"), _item("공과잡비", "화장실 방수공사")]
+    assert _issues(items, "누락") == []
+
+
+def test_욕실_타일을_뜯지_않는_덧방은_방수를_요구하지_않는다():
+    # 기존 타일 위에 붙이면 원래 방수층을 그대로 쓴다. 코퍼스에서 이런 공사의 절반 가까이가 방수를 적지 않는다
+    basic = [_item("철거", "욕실 도기,수전,천장 등 기본철거"), _item("철거", "폐기물 처리"), _item("타일", "화장실 벽타일/300*600")]
+    overlay = [_item("철거", "욕실 철거(타일제외)"), _item("철거", "폐기물 처리"), _item("타일", "화장실 벽타일 덧방")]
+    misread = [_item("철거", "욕실철거/기본철거(타일재외)"), _item("철거", "폐기물 처리"), _item("타일", "화장실 바닥타일")]
+    assert _issues(basic, "누락") == [] and _issues(overlay, "누락") == [] and _issues(misread, "누락") == []
+
+
+def test_욕실이_아닌_곳의_타일_철거는_방수를_요구하지_않는다():
+    items = [_item("철거", "주방타일 철거"), _item("철거", "폐기물 처리"), _item("철거", "현관타일 철거"), _item("타일", "화장실 벽타일")]
+    assert _issues(items, "누락") == []
 
 
 def test_욕실_타일이_없으면_방수를_요구하지_않는다():
@@ -170,7 +184,7 @@ def test_수량이_없는_파싱_결과에서도_단가와_금액으로_수량�
 
 def test_견적서_전체를_보고_낸_지적의_공종도_공종_목록에_들어간다():
     # 욕실 타일은 "타일" 공종으로 읽히는데 방수 누락은 "욕실"에 붙는다. 목록에 없으면 화면 어디에도 나오지 않는다
-    issues, processes = RiskAnalyzer().analyze([_item("타일", "욕실 벽타일"), _item("타일", "욕실 바닥타일")])
+    issues, processes = RiskAnalyzer().analyze([_item("타일", "욕실 벽타일 철거"), _item("타일", "욕실 바닥타일")])
     assert [i.process for i in issues if i.type == "누락"] == ["욕실"]
     assert "욕실" in processes and "타일" in processes
 

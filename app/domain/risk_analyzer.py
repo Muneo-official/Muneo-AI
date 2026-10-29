@@ -20,16 +20,23 @@ PROCESS_KEYWORDS = {
 }
 # 필수 항목: 그 공사를 하면 반드시 따라오는 것만 둔다. 없으면 공사 중 추가 비용으로 돌아온다.
 #   process — 지적을 붙일 공종
-#   when    — 이 낱말 묶음이 모두 견적서에 있을 때만 본다(묶음 안에서는 하나만 있으면 된다). 비어 있으면 그 공종의
-#             품목이 있을 때 본다
+#   when    — 이 낱말 묶음이 모두 한 줄에 있는 품목이 있을 때만 본다(묶음 안에서는 하나만 있으면 된다). 비어 있으면
+#             그 공종의 품목이 있을 때 본다
+#   unless  — 이 낱말이 있는 줄은 when에 맞아도 세지 않는다
 #   need    — 이 낱말 중 하나가 견적서 어디에든 있어야 한다
-# 견적서 전체에서 찾는다. 방수를 욕실이 아니라 기타공사에, 폐기물 처리를 철거가 아니라 기타공사에 적는 견적서가 많다.
+# need는 견적서 전체에서 찾는다. 방수를 욕실이 아니라 기타공사에, 폐기물 처리를 철거가 아니라 기타공사에 적는 견적서가 많다.
 #
 # 예전 표에는 하지 않아도 되는 공사가 필수로 들어 있었다(목공의 천장/가벽·문틀/도어, 설비의 배관, 전기의 콘센트,
 # 주방의 상판/후드). 실제 견적서 368건의 98%가 "누락" 지적을 받았고, 그 대부분이 이 항목들이었다.
+#
+# 방수는 욕실 타일을 뜯을 때만 요구한다. 기존 타일 위에 붙이는 덧방은 원래 방수층을 그대로 쓴다. 욕실 타일만 보고
+# 요구하던 때는 코퍼스 주거 견적서 700건의 28%가 지적을 받았다. 타일을 뜯지 않는 욕실 공사는 절반 가까이가 방수를
+# 적지 않지만, 뜯는 공사는 85%가 적는다. "타일제외"·"타일외"·"타일 아닙니다"처럼 타일을 뜯지 않는다는 줄은 뺀다("재외"는
+# 견적서 사진에서 "제외"가 자주 그렇게 읽힌다).
 REQUIRED_ITEMS = [
     {"process": "철거", "when": [], "need": ["폐기물", "폐기"], "label": "폐기물 처리"},
-    {"process": "욕실", "when": [["욕실", "화장실"], ["타일"]], "need": ["방수"], "label": "방수"},
+    {"process": "욕실", "when": [["욕실", "화장실"], ["철거", "해체"], ["타일", "올철거", "전체철거"]],
+     "unless": ["제외", "재외", "타일외", "아님", "아닙니다", "덧방"], "need": ["방수"], "label": "방수"},
 ]
 
 # 섹션마다 한 번씩 나오는 게 정상인 줄. 품명과 금액이 같아도 중복으로 보지 않는다 — 도기공사와 수전공사의 "인건비
@@ -223,9 +230,15 @@ class RiskAnalyzer:
             f"{i.get('category') or ''} {i.get('description') or ''} {i.get('notes') or ''}"
             for i in line_items if not _is_aggregate_item(i)
         ))
+        lines = [_normalize_text(f"{i.get('category') or ''} {i.get('description') or ''}")
+                 for i in line_items if not _is_aggregate_item(i)]
         issues = []
         for rule in REQUIRED_ITEMS:
-            applies = all(any(w in text for w in group) for group in rule["when"]) if rule["when"] else rule["process"] in by_process
+            if rule["when"]:
+                applies = any(all(any(w in line for w in group) for group in rule["when"])
+                              and not any(w in line for w in rule.get("unless", [])) for line in lines)
+            else:
+                applies = rule["process"] in by_process
             if applies and not any(w in text for w in rule["need"]):
                 process = rule["process"]
                 issues.append(RiskIssue("누락", process, f"{PROCESS_DISPLAY_NAME[process]} 필수 항목 누락", f"'{rule['label']}' 관련 항목이 견적서에서 확인되지 않습니다.", "업체에 해당 항목이 견적에 포함되어 있는지, 별도 비용인지 확인하세요."))
